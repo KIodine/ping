@@ -95,14 +95,18 @@ class IPv4():
         self.src = _u32_to_dot(self.raw_src)
         self.dst = _u32_to_dot(self.raw_dst)
 
-        assert _inet_checksum(b[:20]) == 0
+        assert _inet_checksum(b[:self.ihl*4]) == 0
 
         # handling header option and payload
+        opt_limit = self.ihl*4 - 20
+        payload_limit = self.size - self.ihl*4
         rem = b[20:]
-        self.raw_options = rem[:self.ihl*4 - 20]
-        rem = rem[self.ihl*4 - 20:]
-        self.payload = rem[:]
-        # TODO: add a `rem` field for undigested bytes.
+        self.raw_options = rem[:opt_limit]
+        rem = rem[opt_limit:]   # moving the "pointer"
+        self.payload = rem[:payload_limit]
+        rem = rem[payload_limit:]
+
+        self.rem = rem[:]       # field for undigetsed bytes.
         return
 
 
