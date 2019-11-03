@@ -1,22 +1,35 @@
 import array
 import os
-import struct
+import select
 import socket
+import struct
 import time
 import typing
 from collections import namedtuple
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 
-""" TODO
-    1. (OK)add `make_ping` method to class ICMPv4.
+""" <NOTE>
+    This library focus on only correct `echo_reply` messege,
+    other messeges are considered as error.
 """
 
-""" PROP
+
+""" <TODO>
+    - IPv6 compatibility.
+    - more information about icmp reply, handling cases
+      that icmp type is not `ECHO_REPLY`.
+
+    <PROPOSAL>
     1. more verbose `ping_*` function.
     2. `Monitor` class for non-blocking, multiple host status polling.
     3. substitute mutiple return value with custom namedtuple
     4. Mapping ICMPv4 parse result to Enum.
+    5. refactor method `ping_once` and `ping_multi` from class `Ping`
+       -> merged into single `ping` method?
+    6. more verbose `_ping` return value, the upper layer decide throwing
+       exception or not.
 """
 
 _IPhdr_test = ">B"
@@ -46,8 +59,14 @@ PingState = typing.Tuple[bool, float]
 
 
 class ICMPType(SimpleNamespace):
-    EchoRequest = 8
+    EchoReply =                 0
+    DestinationUnreachable =    3
+    SourceQuench =              4
+    RedirectMessage =           5
+    EchoRequest =               8
+    TimeExceeded =              11
 # _ICMP_table = {i.value: i for i in ICMPType}
+
 
 def _inet_checksum(data: bytes) -> int:
     # TODO: ensure the length of data must be multiple of words.
@@ -68,8 +87,54 @@ def _get_ip_ver(b: bytes) -> int:
     ver = (u8[0] & 0xF0) >> 4
     return ver
 
+def make_simple_ping() -> bytes:
+    # make an ICMPv4 echo request packet.
+    data = DEFAULT_PING_PAYLOAD
+    pid = os.getpid()
+    s = b""
+    header = _ICMPv4_struct.pack(
+        ICMPType.EchoRequest, 0,
+        0,          pid, 0
+    )
+    chksum = _inet_checksum(header + data)
+    header = _ICMPv4_struct.pack(
+        ICMPType.EchoRequest, 0,
+        chksum,     pid, 0
+    )
+    s = header + data
+    assert _inet_checksum(s) == 0
+    return s
 
-# parsing data returned by "recvfrom" function.
+def get_icmp_addrif(host: str, version: int) -> Addrinfo:
+    addrif: Addrinfo = None
+    if not version in (socket.AF_INET, socket.AF_INET6):
+        raise Exception("{} is not a valid IP version".format(version))
+    try:
+        ai = socket.getaddrinfo(
+            host, 0,
+            version,
+            socket.SOCK_RAW,
+            socket.getprotobyname("ICMP"),
+            socket.AI_CANONNAME
+        )
+    except socket.gaierror:
+        pass
+    for af, *rem in ai:
+        if af == version:
+            addrif = Addrinfo(af, *rem)
+    return addrif
+
+@contextmanager
+def _set_timeout(socket: socket.socket, timeout: float):
+    old_timeout = socket.gettimeout()
+    socket.settimeout(timeout)
+    try:
+        yield
+    finally:
+        # restore timeout anyway.
+        socket.settimeout(old_timeout)
+    return
+
 
 class IPv4():
     """Simple IPv4 packet parser."""
@@ -119,45 +184,41 @@ class ICMPv4():
         self.type =     icmpv4[0]
         self.code =     icmpv4[1]
         self.checksum = icmpv4[2]
+        # the following fields are actually type-dependent.
         self.id =       icmpv4[3]
         self.seq =      icmpv4[4]
         
         self.payload = b[2*4:]
         return
 
-    @staticmethod
-    def make_ping() -> bytes:
-        #payload: bytes=b'A\x00'
-        #sz = len(payload)
-        ## if payload size violates:
-        #if (sz > (IPv4_MAX_SZ - 8)):
-        #    #   1) maximum ipv4 packet size
-        #    raise Exception("Payload size too big: {}".format(sz))
-        #if (sz & 0b1):
-        #    #   2) is not multiple of 4 (sizeof(uint32_t))
-        #    raise Exception("Payload size is not multiple of 2 bytes")
-        data = DEFAULT_PING_PAYLOAD
-        pid = os.getpid()
-        s = b""
-        # NOTE: we can modify `id` and `sequence` field for identification.
-        # for example, current time as payload
-        header = _ICMPv4_struct.pack(
-            ICMPType.EchoRequest, 0,
-            0,          pid, 0
-        )
-        chksum = _inet_checksum(header + data)
-        header = _ICMPv4_struct.pack(
-            ICMPType.EchoRequest, 0,
-            chksum,     pid, 0
-        )
-        s = header + data
-        assert _inet_checksum(s) == 0
-        return s
+
+class _PacketRecord():
+    """Auxillary class for package loading and delay calculation."""
+    def __init__(self):
+        self.send_time = time.time()
+        self.recv_time = float("inf")
+        self.ip_pack = None
+        self.is_echo_reply = False
+        return
+    
+    def insert_packet(self, b: bytes):
+        self.recv_time = time.time()
+        self.ip_pack = IPv4(b)
+        if self.ip_pack.proto == socket.IPPROTO_ICMP:
+            icmp = ICMPv4(self.ip_pack.payload)
+            if icmp.type == ICMPType.EchoReply:
+                self.is_echo_reply = True
+        return
+    
+    def get_delay(self) -> float:
+        if self.ip_pack is not None and self.is_echo_reply is True:
+            return self.recv_time - self.send_time
+        return float("NaN")
 
 
 """ ping methods
     - once      OK
-    - multi     TODO
+    - multi     OK
     - ...
 """
 class Ping():
@@ -168,77 +229,109 @@ class Ping():
             socket.SOCK_RAW,
             proto_icmp
         )
-        self.packet = ICMPv4.make_ping()
+        self.packet = make_simple_ping()
         return
     
     def _ping(
-            self, addr: typing.Tuple[typing.Tuple, int],
-            timeout: int=DEFAULT_TIMEOUT
-        ) -> typing.Tuple[bool, float]:
+            self, addr: typing.Tuple[typing.Tuple, int]
+        ) -> PingState:
+        # PROPOSAL: remove `timeout` parameter? Done.
         ok = True
         dt = time.perf_counter()
         try:
             self.sock.sendto(self.packet, addr)
-            # TODO: make use of `raw` and `addr`
-            _, _ = self.sock.recvfrom(DEFAULT_RCV_BUFSZ)
+            # TODO: handle case that ping is not success.
+            raw, _ = self.sock.recvfrom(DEFAULT_RCV_BUFSZ)
+            ippack = IPv4(raw)
+            if ippack.proto != 0x01:    # ICMP
+                raise Exception(
+                    "Not receiving an ICMP packet instead: {}".format(
+                        ippack.proto
+                        )
+                    )
+            icmppack = ICMPv4(ippack.payload)
+            if icmppack.type != ICMPType.EchoReply:
+                # NOTE: a temporary solution
+                raise Exception(
+                    "Ping failed, reason: {}".format(icmppack.type)
+                )
         except socket.timeout:
             ok = False
         dt = time.perf_counter() - dt
         if not ok:
-            dt = 0
+            dt = 0.0
         return ok, dt
-
-    @staticmethod
-    def _get_icmp_addrif(host: str) -> Addrinfo:
-        """
-        Return the first available IPv4 addrinfo.
-        """
-        addrif = None
-        try:
-            _if = socket.getaddrinfo(
-                host, 1, socket.AF_INET,
-                socket.SOCK_DGRAM,
-                socket.IPPROTO_ICMP
-            )
-        except socket.gaierror:
-            raise Exception("Host unresolvable: {}".format(host))
-        for af, *rem in _if:
-            if af == socket.AF_INET:
-                addrif = Addrinfo(af, *rem)
-        if addrif is None:
-            raise Exception(
-                "No available IPv4 address for host{}.".format(host)
-            )
-        return addrif
 
     def ping_once(
             self, host: str,
             timeout: int=DEFAULT_TIMEOUT
         ) -> PingState:
-        addrif = self._get_icmp_addrif(host)
-        self.sock.settimeout(timeout/1000)
-        suc, dt = self._ping(addrif.sockaddr, timeout)
+        addrif = get_icmp_addrif(host, socket.AF_INET)
+        if addrif is None:
+            raise Exception("No addrinfo for host: {}".format(host))
+        with _set_timeout(self.sock, timeout/1000):
+            suc, dt = self._ping(addrif.sockaddr)
         return suc, dt
 
-    def ping_multi(
-            self, host: str, count: int, interval: int, timeout: int
+    def ping_seq(
+            self, host: str, count: int,
+            interval: int,
+            timeout: int=DEFAULT_TIMEOUT
         ) -> typing.List[PingState]:
-        addrif = self._get_icmp_addrif(host)
+        addrif = get_icmp_addrif(host, socket.AF_INET)
+        if addrif is None:
+            raise Exception("No addrinfo for host: {}".format(host))
         res = list()
         interval /= 1000
-        self.sock.settimeout(timeout/1000)
-        for _ in range(count):
-            # a little function call overhead should not ba a problem?
-            res.append(self._ping(addrif.sockaddr, timeout))
-            time.sleep(interval)
+        with _set_timeout(self.sock, timeout/1000):
+            for _ in range(count):
+                # a little function call overhead should not ba a problem?
+                res.append(self._ping(addrif.sockaddr))
+                time.sleep(interval)
         return res
 
-    # def ping_verbose ...
-    # 
-
-    class Monitor():
-        pass
-        # send all ping requests at once
-        # vs
-        # non-blocking polling
+    def ping_multi(
+            self, host_list: typing.List[str],
+            timeout: int=DEFAULT_TIMEOUT
+        ) -> typing.Dict[str, PingState]:
+        """Returning a mapping of host-delay."""
+        # TODO: porting multi ping logic from `multip.py`.
+        # host -> addr -> PacketRecord
+        #send_delay = 1/1000 # s
+        packet_sent = 0
+        host_addr_map = {
+            host: get_icmp_addrif(host, socket.AF_INET)
+            for host in host_list
+        }
+        addr_pr_map = dict()
+        host_delay_map = dict()
+        
+        for host, ai in host_addr_map.items():
+            addr, _ = ai.sockaddr
+            _ = self.sock.sendto(self.packet, ai.sockaddr)
+            addr_pr_map[addr] = _PacketRecord()
+            packet_sent += 1
+            # time.sleep(delay)
+        rem_timeout = timeout/1000
+        rem_recv = packet_sent
+        print(packet_sent)
+        while True:
+            t0 = time.perf_counter()
+            r, _, _ = select.select([self.sock,], [], [], rem_timeout)
+            if r != []:
+                for s in r:
+                    raw, (addr, _) = s.recvfrom(DEFAULT_RCV_BUFSZ)
+                    addr_pr_map[addr].insert_packet(raw)
+                    rem_recv -= 1
+                    dt = time.perf_counter() - t0
+                    rem_timeout -= dt
+                if rem_recv == 0:
+                    break
+            else:
+                # `select` timeouts.
+                break
+        for host in host_list:
+            addr, _ = host_addr_map[host].sockaddr
+            host_delay_map[host] = addr_pr_map[addr].get_delay()
+        return host_delay_map
 
