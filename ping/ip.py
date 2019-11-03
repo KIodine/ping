@@ -10,6 +10,12 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 
+__all__ = [
+    "IPv4",
+    "ICMPv4",
+    "Ping",
+]
+
 """ <NOTE>
     This library focus on only correct `echo_reply` messege,
     other messeges are considered as error.
@@ -22,13 +28,14 @@ from types import SimpleNamespace
       that icmp type is not `ECHO_REPLY`.
 
     <PROPOSAL>
-    1. more verbose `ping_*` function.
-    2. `Monitor` class for non-blocking, multiple host status polling.
-    3. substitute mutiple return value with custom namedtuple
-    4. Mapping ICMPv4 parse result to Enum.
-    5. refactor method `ping_once` and `ping_multi` from class `Ping`
+    - refining functions.
+    - a "no exception" version of ping.
+    - `Monitor` class for non-blocking, multiple host status polling.
+    - substitute mutiple return value with custom namedtuple
+    - Mapping ICMPv4 parse result to Enum.
+    - refactor method `ping_once` and `ping_multi` from class `Ping`
        -> merged into single `ping` method?
-    6. more verbose `_ping` return value, the upper layer decide throwing
+    - more verbose `_ping` return value, the upper layer decide throwing
        exception or not.
 """
 
@@ -173,6 +180,8 @@ class IPv4():
 
         self.rem = rem[:]       # field for undigetsed bytes.
         return
+    
+    # TODO: implement `__repr__` method
 
 
 class ICMPv4():
@@ -190,6 +199,8 @@ class ICMPv4():
         
         self.payload = b[2*4:]
         return
+
+    # TODO: implement `__repr__` method
 
 
 class _PacketRecord():
@@ -216,11 +227,6 @@ class _PacketRecord():
         return float("NaN")
 
 
-""" ping methods
-    - once      OK
-    - multi     OK
-    - ...
-"""
 class Ping():
     def __init__(self):
         proto_icmp = socket.getprotobyname("icmp")
@@ -232,6 +238,10 @@ class Ping():
         self.packet = make_simple_ping()
         return
     
+    def __del__(self):
+        self.sock.close()
+        return
+
     def _ping(
             self, addr: typing.Tuple[typing.Tuple, int]
         ) -> PingState:
@@ -266,6 +276,7 @@ class Ping():
             self, host: str,
             timeout: int=DEFAULT_TIMEOUT
         ) -> PingState:
+        """Ping host once."""
         addrif = get_icmp_addrif(host, socket.AF_INET)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
@@ -278,6 +289,7 @@ class Ping():
             interval: int,
             timeout: int=DEFAULT_TIMEOUT
         ) -> typing.List[PingState]:
+        """Ping host sequencially."""
         addrif = get_icmp_addrif(host, socket.AF_INET)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
@@ -293,10 +305,15 @@ class Ping():
     def ping_multi(
             self, host_list: typing.List[str],
             timeout: int=DEFAULT_TIMEOUT
-        ) -> typing.Dict[str, PingState]:
+        ) -> typing.Dict[str, float]:
         """Returning a mapping of host-delay."""
-        # TODO: porting multi ping logic from `multip.py`.
         # host -> addr -> PacketRecord
+        # PROPOSAL: An optional parameter of a dict for storing result,
+        #   saving memory and construction time.
+        # NOTE: Some issue from `multi-ping` library reported that
+        #   burst ping results in packet loss, it can (probably) be eliminated
+        #   by introducing a small amount of delay between each 
+        #   packet dispatching.
         #send_delay = 1/1000 # s
         packet_sent = 0
         host_addr_map = {
@@ -311,10 +328,9 @@ class Ping():
             _ = self.sock.sendto(self.packet, ai.sockaddr)
             addr_pr_map[addr] = _PacketRecord()
             packet_sent += 1
-            # time.sleep(delay)
+            #time.sleep(delay)
         rem_timeout = timeout/1000
         rem_recv = packet_sent
-        print(packet_sent)
         while True:
             t0 = time.perf_counter()
             r, _, _ = select.select([self.sock,], [], [], rem_timeout)
@@ -326,6 +342,7 @@ class Ping():
                     dt = time.perf_counter() - t0
                     rem_timeout -= dt
                 if rem_recv == 0:
+                    # if we retrived all packet, break out early.
                     break
             else:
                 # `select` timeouts.
