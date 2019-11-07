@@ -1,4 +1,5 @@
 import array
+import operator
 import os
 import select
 import socket
@@ -24,10 +25,6 @@ __all__ = [
 
 """ <TODO>
     - IPv6 compatibility.
-    - more information about icmp reply, handling cases
-      that icmp type is not `ECHO_REPLY`.
-    - a verbose version of `ping_*` that returns IP and ICMP packet.
-      callback(s) is passed and return value(s) can be customized.
 
 
     <PROPOSAL>
@@ -36,8 +33,9 @@ __all__ = [
     - `Monitor` class for non-blocking, multiple host status polling.
     - substitute mutiple return value with custom namedtuple
     - Mapping ICMPv4 parse result to Enum.
-    - refactor method `ping_once` and `ping_seq` from class `Ping`
-       -> merged into single `ping` method?
+    - multi-process/multi-thread version
+    - super massive ping(kind of illegal)
+    - customiszble ping payload
 """
 
 _IPhdr_test = ">B"
@@ -70,12 +68,12 @@ Sockaddr = typing.Tuple[typing.Tuple, int]
 
 
 class ICMPType(SimpleNamespace):
-    EchoReply =                 0
-    DestinationUnreachable =    3
-    SourceQuench =              4
-    RedirectMessage =           5
-    EchoRequest =               8
-    TimeExceeded =              11
+    EchoReply               = 0
+    DestinationUnreachable  = 3
+    SourceQuench            = 4
+    RedirectMessage         = 5
+    EchoRequest             = 8
+    TimeExceeded            = 11
 # _ICMP_table = {i.value: i for i in ICMPType}
 
 
@@ -97,6 +95,21 @@ def _get_ip_ver(b: bytes) -> int:
     u8 = struct.unpack(_IPhdr_test, b[:1])
     ver = (u8[0] & 0xF0) >> 4
     return ver
+
+def _is_valid_v4addr(s: str) -> bool:
+    """Test a string is one of domain name or dot-decimal representation."""
+    v4s = s.split(".")
+    length = len(v4s)
+    if length > 1 and v4s[0].isalpha():
+        # assume it is hostname
+        return True
+    # check is dot-decimal format
+    if length != 4:
+        return False
+    for d in v4s:
+        if not d.isalnum() or not (255 >= int(d) >= 0):
+            return False
+    return True
 
 def make_simple_ping() -> bytes:
     # make an ICMPv4 echo request packet.
@@ -155,21 +168,21 @@ class IPv4():
             raise ValueError("{} is not a valid IP version".format(ver))
         v4 = _IPv4_struct.unpack(b[:20]) # fixed length of 20 bytes
 
-        self.ver = ver
-        self.ihl =      v4[0] & 0xF         # header length in dwords
-        self.ds =       v4[1] & 0xFC >> 2
-        self.ecn =      v4[1] & 0x3
-        self.size =     v4[2]               # total packet size
-        self.ident =    v4[3]
-        self.flags =    v4[4] & 0xE0 >> 5
-        self.offset =   v4[4] & 0x1F
-        self.ttl =      v4[5]
-        self.proto =    v4[6]
-        self.checksum = v4[7]
-        self.raw_src =  v4[8]
-        self.raw_dst =  v4[9]
-        self.src = _u32_to_dot(self.raw_src)
-        self.dst = _u32_to_dot(self.raw_dst)
+        self.ver        = ver
+        self.ihl        = v4[0] & 0xF         # header length in dwords
+        self.ds         = v4[1] & 0xFC >> 2
+        self.ecn        = v4[1] & 0x3
+        self.size       = v4[2]               # total packet size
+        self.ident      = v4[3]
+        self.flags      = v4[4] & 0xE0 >> 5
+        self.offset     = v4[4] & 0x1F
+        self.ttl        = v4[5]
+        self.proto      = v4[6]
+        self.checksum   = v4[7]
+        self.raw_src    = v4[8]
+        self.raw_dst    = v4[9]
+        self.src        = _u32_to_dot(self.raw_src)
+        self.dst        = _u32_to_dot(self.raw_dst)
 
         assert _inet_checksum(b[:self.ihl*4]) == 0
 
@@ -194,14 +207,13 @@ class ICMPv4():
         # TODO: complete check
         icmpv4 = _ICMPv4_struct.unpack(b[:8])
 
-        self.type =     icmpv4[0]
-        self.code =     icmpv4[1]
-        self.checksum = icmpv4[2]
+        self.type       = icmpv4[0]
+        self.code       = icmpv4[1]
+        self.checksum   = icmpv4[2]
         # the following fields are actually type-dependent.
-        self.id =       icmpv4[3]
-        self.seq =      icmpv4[4]
-        
-        self.payload = b[2*4:]
+        self.id         = icmpv4[3]
+        self.seq        = icmpv4[4]
+        self.payload    = b[2*4:]
         return
 
     # TODO: implement `__repr__` method
@@ -210,11 +222,11 @@ class ICMPv4():
 class _PacketRecord():
     """Auxillary class for package loading and delay calculation."""
     def __init__(self):
-        self.send_time = time.time()
-        self.recv_time = float("inf")
-        self.ip_pack = None
-        self.icmp_pack = None
-        self.is_echo_reply = False
+        self.send_time      = time.time()
+        self.recv_time      = float("inf")
+        self.ip_pack        = None
+        self.icmp_pack      = None
+        self.is_echo_reply  = False
         return
     
     def parse_packet(self, b: bytes):
@@ -258,6 +270,7 @@ class Ping():
             Note that `icmpv4_callback` will be called only if IPv4 packet
             contains correct ICMPv4 packet.
         """
+        # NOTE: seems callbacks are some kind of redundant.
         t0 = time.perf_counter()
         dt = 0.0
         ipv4_cb_res: typing.Any     = None
@@ -285,7 +298,10 @@ class Ping():
             timeout: int=DEFAULT_TIMEOUT
         ) -> typing.Tuple[float, bool]:
         """Simply ping the host."""
+        dt  = 0
         suc = False
+        if not _is_valid_v4addr(host):
+            raise Exception("{} is probably not a valid address.".format(host))
         addrif = get_icmp_addrif(host, socket.AF_INET)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
@@ -305,6 +321,8 @@ class Ping():
         """Ping host for `count` times with `interval` delay."""
         dt  = 0
         suc = False
+        if not _is_valid_v4addr(host):
+            raise Exception("{} is probably not a valid address.".format(host))
         addrif = get_icmp_addrif(host, socket.AF_INET)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
@@ -319,48 +337,33 @@ class Ping():
                 time.sleep(interval)
         return res
 
-    def ping_multi(
-            self, host_list: typing.List[str],
-            timeout: int=DEFAULT_TIMEOUT,
-            mapping: dict=None
-        ) -> typing.Dict[str, float]:
-        """
-            Ping multiple hosts at a time, return a dict of host to delay and
-            `True` if succeeded.
-            An optional `mapping` parameter can be passed as the destination
-            of results.
-        """
-        # host -> addr -> PacketRecord
-        # PROPOSAL: An optional parameter of a dict for storing result,
-        #   saving memory and construction time.
+    def _con_send_icmp_er(
+            self, ai_list: typing.List,
+            timeout: int
+        ) -> dict:
+        """Concurrent icmp echo request sender."""
+        packet_sent = 0
+        addr_pr_map = dict()
+        socket_list = [self.sock,]
+        # NOTE: maybe some day a multi socket multiping?
         # NOTE: Some issues from `multi-ping` library reported that
         #   burst ping results in packet loss, it can (probably) be eliminated
         #   by introducing a small amount of delay between each 
         #   packet dispatching.
-        #send_delay = 1/1000 # s
-        packet_sent = 0
-        host_addr_map = {
-            host: get_icmp_addrif(host, socket.AF_INET)
-            for host in host_list
-        }
-        addr_pr_map = dict()
-        # use existing mapping if passed.
-        host_delay_map = dict() if mapping is None else mapping
-        
-        for host, ai in host_addr_map.items():
+        for ai in ai_list:
             addr, _ = ai.sockaddr
             _ = self.sock.sendto(self.packet, ai.sockaddr)
             addr_pr_map[addr] = _PacketRecord()
             packet_sent += 1
-            #time.sleep(delay)
+            #time.sleep(SEND_DELAY)
         rem_timeout = timeout/1000
         rem_recv = packet_sent
         while True:
             t0 = time.perf_counter()
-            r, _, _ = select.select([self.sock,], [], [], rem_timeout)
+            r, _, _ = select.select(socket_list, [], [], rem_timeout)
             if r != []:
-                for s in r:
-                    raw, (addr, _) = s.recvfrom(DEFAULT_RCV_BUFSZ)
+                for sock in r:
+                    raw, (addr, _) = sock.recvfrom(DEFAULT_RCV_BUFSZ)
                     addr_pr_map[addr].parse_packet(raw)
                     rem_recv -= 1
                     dt = time.perf_counter() - t0
@@ -371,8 +374,64 @@ class Ping():
             else:
                 # `select` timeouts.
                 break
+        return addr_pr_map
+
+    def _ping_multi(
+            self, host_list: typing.List[str],
+            timeout: int=DEFAULT_TIMEOUT,
+            mapping: dict=None,
+            pr_callback: typing.Callable[[_PacketRecord,], typing.Any]=None
+        ) -> typing.Dict[str, float]:
+        """
+        Bottom layer of `ping_multi`, accepting a callback for preprocess.
+        If callback is None, the raw `_PacketRecord` instances are exposed.
+        """
+        # host -> addr -> PacketRecord
+        # PROPOSAL: An optional parameter of a dict for storing result,
+        #   saving memory and construction time.
         for host in host_list:
-            addr, _ = host_addr_map[host].sockaddr
-            host_delay_map[host] = addr_pr_map[addr].get_delay()
+            if not _is_valid_v4addr(host):
+                raise Exception(
+                    "{} is probably not a valid address.".format(host)
+                )
+        host_addr_map = {
+            host: get_icmp_addrif(host, socket.AF_INET)
+            for host in host_list
+        }
+        host_delay_map = dict() if mapping is None else mapping
+        
+        addr_pr_map = self._con_send_icmp_er(
+            host_addr_map.values(), timeout
+        )
+        # TODO: generalize the following part, exposing `_PacketRecord`
+        #   elements.(DONE)
+        #   -> a callback of `void* (*cb)(_PacketRecord* pr)`
+        res: typing.Any = None
+        for host, ai in host_addr_map.items():
+            addr, _ = ai.sockaddr
+            if pr_callback is not None:
+                res = pr_callback(addr_pr_map[addr])
+            else:
+                # raw `_PacketRecord` instance
+                res = addr_pr_map[addr]
+            host_delay_map[host] = res
+        
         return host_delay_map
+
+    def ping_multi(
+            self, host_list: typing.List[str],
+            timeout: int=DEFAULT_TIMEOUT,
+            mapping: dict=None
+        ) -> typing.Dict[str, float]:
+        """
+            Ping multiple hosts at a time, return a dict of host to delay and
+            `True` if succeeded.
+            An optional `mapping` parameter can be passed as an alternative 
+            destination of results.
+        """
+        get_delay_cb = operator.methodcaller("get_delay")
+        return self._ping_multi(
+                host_list, timeout=timeout, mapping=mapping,
+                pr_callback=get_delay_cb
+            )
 

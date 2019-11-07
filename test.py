@@ -29,4 +29,12 @@ a = p.ping_seq("www.google.com", 4, 200, 600)
 print(a)
 
 a = p.ping_multi(HOSTS)
-print(a)
+print(
+    "\n".join(
+        [
+            f"{host:18s}: {delay:.6f}"
+            for host, delay in a.items()
+        ]
+    )
+)
+#print(a)
