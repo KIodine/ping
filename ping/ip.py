@@ -243,6 +243,19 @@ class _PacketRecord():
             return self.recv_time - self.send_time
         return float("NaN")
 
+    def as_namedtuple(self):
+        return
+
+
+class _PingMultiRecord():
+    """Auxiliary data carrier."""
+    def __init__(self, host: str, addrif: Addrinfo):
+        self.host       = host
+        self.addrinfo   = addrif
+        self.packet_record: _PacketRecord   = None
+        self.res: typing.Any                = None
+        return
+
 
 class Ping():
     def __init__(self):
@@ -338,22 +351,26 @@ class Ping():
         return res
 
     def _con_send_icmp_er(
-            self, ai_list: typing.List,
+            self, pmr_list: typing.List[_PingMultiRecord],
             timeout: int
         ) -> dict:
         """Concurrent icmp echo request sender."""
         packet_sent = 0
-        addr_pr_map = dict()
+        # in C we'll use BST or hash table.
+        addr_pmr_map = {
+            pmr.addrinfo.sockaddr[0]: pmr
+            for pmr in pmr_list
+        }
         socket_list = [self.sock,]
         # NOTE: maybe some day a multi socket multiping?
         # NOTE: Some issues from `multi-ping` library reported that
         #   burst ping results in packet loss, it can (probably) be eliminated
         #   by introducing a small amount of delay between each 
         #   packet dispatching.
-        for ai in ai_list:
-            addr, _ = ai.sockaddr
-            _ = self.sock.sendto(self.packet, ai.sockaddr)
-            addr_pr_map[addr] = _PacketRecord()
+        for pmr in pmr_list:
+            addr, _ = pmr.addrinfo.sockaddr
+            _ = self.sock.sendto(self.packet, pmr.addrinfo.sockaddr)
+            addr_pmr_map[addr].packet_record = _PacketRecord()
             packet_sent += 1
             #time.sleep(SEND_DELAY)
         rem_timeout = timeout/1000
@@ -364,7 +381,7 @@ class Ping():
             if r != []:
                 for sock in r:
                     raw, (addr, _) = sock.recvfrom(DEFAULT_RCV_BUFSZ)
-                    addr_pr_map[addr].parse_packet(raw)
+                    addr_pmr_map[addr].packet_record.parse_packet(raw)
                     rem_recv -= 1
                     dt = time.perf_counter() - t0
                     rem_timeout -= dt
@@ -374,14 +391,14 @@ class Ping():
             else:
                 # `select` timeouts.
                 break
-        return addr_pr_map
+        return addr_pmr_map
 
     def _ping_multi(
             self, host_list: typing.List[str],
             timeout: int=DEFAULT_TIMEOUT,
             mapping: dict=None,
             pr_callback: typing.Callable[[_PacketRecord,], typing.Any]=None
-        ) -> typing.Dict[str, float]:
+        ) -> typing.Dict[str, typing.Any]:
         """
         Bottom layer of `ping_multi`, accepting a callback for preprocess.
         If callback is None, the raw `_PacketRecord` instances are exposed.
@@ -394,29 +411,37 @@ class Ping():
                 raise Exception(
                     "{} is probably not a valid address.".format(host)
                 )
-        host_addr_map = {
-            host: get_icmp_addrif(host, socket.AF_INET)
+        pmr_list = [
+            _PingMultiRecord(
+                host, get_icmp_addrif(host, socket.AF_INET)
+            )
             for host in host_list
-        }
-        host_delay_map = dict() if mapping is None else mapping
+        ]
+        for pmr in pmr_list:
+            if pmr.addrinfo is None:
+                raise Exception("No addrinfo for host: {}".format(pmr.host))
+
+        host_res_map = dict() if mapping is None else mapping
         
-        addr_pr_map = self._con_send_icmp_er(
-            host_addr_map.values(), timeout
+        _ = self._con_send_icmp_er( # addr_pmr_map
+            pmr_list, timeout
         )
         # TODO: generalize the following part, exposing `_PacketRecord`
         #   elements.(DONE)
         #   -> a callback of `void* (*cb)(_PacketRecord* pr)`
+        # host: addr; addr: _PacketRecord
+        # if we receive (addr, _PacketRecord), how to map host to 
+        # `_PacketRecord`?
+        # addr: (host, ai, _PacketRecord)
         res: typing.Any = None
-        for host, ai in host_addr_map.items():
-            addr, _ = ai.sockaddr
+        for pmr in pmr_list:
             if pr_callback is not None:
-                res = pr_callback(addr_pr_map[addr])
+                res = pr_callback(pmr.packet_record)
             else:
-                # raw `_PacketRecord` instance
-                res = addr_pr_map[addr]
-            host_delay_map[host] = res
-        
-        return host_delay_map
+                res = pmr.packet_record
+            host_res_map[pmr.host] = res
+
+        return host_res_map
 
     def ping_multi(
             self, host_list: typing.List[str],
@@ -434,4 +459,3 @@ class Ping():
                 host_list, timeout=timeout, mapping=mapping,
                 pr_callback=get_delay_cb
             )
-
