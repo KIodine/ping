@@ -396,9 +396,8 @@ class Ping():
     def _ping_multi(
             self, host_list: typing.List[str],
             timeout: int=DEFAULT_TIMEOUT,
-            mapping: dict=None,
             pr_callback: typing.Callable[[_PacketRecord,], typing.Any]=None
-        ) -> typing.Dict[str, typing.Any]:
+        ) -> typing.Dict[str, _PingMultiRecord]:
         """
         Bottom layer of `ping_multi`, accepting a callback for preprocess.
         If callback is None, the raw `_PacketRecord` instances are exposed.
@@ -420,8 +419,6 @@ class Ping():
         for pmr in pmr_list:
             if pmr.addrinfo is None:
                 raise Exception("No addrinfo for host: {}".format(pmr.host))
-
-        host_res_map = dict() if mapping is None else mapping
         
         _ = self._con_send_icmp_er( # addr_pmr_map
             pmr_list, timeout
@@ -433,15 +430,11 @@ class Ping():
         # if we receive (addr, _PacketRecord), how to map host to 
         # `_PacketRecord`?
         # addr: (host, ai, _PacketRecord)
-        res: typing.Any = None
         for pmr in pmr_list:
             if pr_callback is not None:
-                res = pr_callback(pmr.packet_record)
-            else:
-                res = pmr.packet_record
-            host_res_map[pmr.host] = res
-
-        return host_res_map
+                pmr.res = pr_callback(pmr.packet_record)
+            pass
+        return pmr_list
 
     def ping_multi(
             self, host_list: typing.List[str],
@@ -454,8 +447,20 @@ class Ping():
             An optional `mapping` parameter can be passed as an alternative 
             destination of results.
         """
+        host_delay_map: typing.Dict[str, float] = None
         get_delay_cb = operator.methodcaller("get_delay")
-        return self._ping_multi(
-                host_list, timeout=timeout, mapping=mapping,
+        res = self._ping_multi(
+                host_list, timeout=timeout,
                 pr_callback=get_delay_cb
             )
+        if mapping is None:
+            host_delay_map = {
+                pmr.host: pmr.res
+                for pmr in res
+            }
+        else:
+            host_delay_map = mapping
+            for pmr in res:
+                host_delay_map[pmr.host] = pmr.res
+        
+        return host_delay_map
