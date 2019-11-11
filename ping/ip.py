@@ -51,6 +51,7 @@ DEFAULT_TIMEOUT =   2000            # ms
 DEFAULT_INTERVAL =  1000            # ms
 DEFAULT_PING_PAYLOAD = b"A\x00"
 DEFAULT_RCV_BUFSZ = 1024
+DEFAULT_PAYLOAD_SZ = 1024
 
 IPv4_MAX_SZ = (1 << 16) - 1
 
@@ -111,23 +112,42 @@ def _is_valid_v4addr(s: str) -> bool:
             return False
     return True
 
+def _make_icmp_packet(
+        msg_type: int, msg_code: int, u32: int, payload: bytes
+    ) -> bytes:
+    pad = b"\x00"
+    hdr = struct.pack("BBHL", msg_type, msg_code, 0, u32)
+    if msg_type == ICMPType.EchoRequest and (len(payload) & 0b1) == 1:
+        chksum = _inet_checksum(hdr + payload + pad)
+    else:
+        chksum = _inet_checksum(hdr + payload)
+    hdr = struct.pack("BBHL", msg_type, msg_code, chksum, u32)
+    return hdr + payload
+
+def make_icmp_ping(
+        ident: int, seq_num: int, payload: bytes
+    ) -> bytes:
+    # PROPOSAL: force input to be 
+    if (len(payload) & 0b1) != 0:
+        # we require the bytes of payload must be multiple of 2 for checksum
+        # calculation, an additional zero is padded if the size is odd.
+        #   (rfc792)
+        raise ValueError("payload must be multiple of 2 bytes.")
+    if (len(payload) > DEFAULT_PAYLOAD_SZ):
+        raise ValueError(
+            ("payload larger than default size limit: {}, large payload may"
+             "results in IP packet fragment.").format(DEFAULT_PAYLOAD_SZ)
+        )
+    u32_buf = ((ident & 0xFFFF) << 16) & (seq_num & 0xFFFF)
+    return _make_icmp_packet(
+            ICMPType.EchoRequest,
+            0, u32_buf, payload
+        )
+
 def make_simple_ping() -> bytes:
-    # make an ICMPv4 echo request packet.
-    data = DEFAULT_PING_PAYLOAD
-    pid = os.getpid()
-    s = b""
-    header = _ICMPv4_struct.pack(
-        ICMPType.EchoRequest, 0,
-        0,          pid, 0
-    )
-    chksum = _inet_checksum(header + data)
-    header = _ICMPv4_struct.pack(
-        ICMPType.EchoRequest, 0,
-        chksum,     pid, 0
-    )
-    s = header + data
-    assert _inet_checksum(s) == 0
-    return s
+    return make_icmp_ping(
+            os.getpid(), 0, DEFAULT_PING_PAYLOAD
+        )
 
 def get_icmp_addrif(host: str, version: int) -> Addrinfo:
     addrif: Addrinfo = None
@@ -377,14 +397,28 @@ class Ping():
         rem_recv = packet_sent
         while True:
             t0 = time.perf_counter()
+            # FIXME: seems `select` is not a proper choice if you want to
+            #   measure the delay of multiple host at once.
+            #   use `socket.settimeout` instead?
+            #   or it just impossible to do that?
             r, _, _ = select.select(socket_list, [], [], rem_timeout)
             if r != []:
                 for sock in r:
                     raw, (addr, _) = sock.recvfrom(DEFAULT_RCV_BUFSZ)
-                    addr_pmr_map[addr].packet_record.parse_packet(raw)
+                    # FIXME: it may sometimes receives packets from previous
+                    #   call? -> yes
+                    #   identifying each packet? iCMP?
+                    if addr in addr_pmr_map.keys():
+                        addr_pmr_map[addr].packet_record.parse_packet(raw)
+                    else:
+                        # TODO: parse raw packet and see what happends.
+                        print(f"received packet from {addr}, raw:\n{raw}")
+                        pass
                     rem_recv -= 1
                     dt = time.perf_counter() - t0
                     rem_timeout -= dt
+                    if rem_timeout < 0.0:
+                        rem_timeout = 0.0
                 if rem_recv == 0:
                     # if we retrived all packet, break out early.
                     break
