@@ -22,10 +22,10 @@ icmp2 = ping.ICMPv4(a)
 print("checksum: ", ping.ip._inet_checksum(a))
 
 p = ping.Ping()
-suc, dt = p.ping_once("www.google.com", 500)
+suc, dt = p.ping_once("www.google.com", 0.5)
 print(suc, dt)
 
-a = p.ping_seq("www.google.com", 4, 200, 600)
+a = p.ping_seq("www.google.com", 4, 0.2, 0.6)
 print(a)
 
 a = p.ping_multi(HOSTS)

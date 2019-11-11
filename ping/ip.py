@@ -47,8 +47,8 @@ _ICMP_hdr_lo = "BBHHH"
 _IPv4_struct = struct.Struct(_IPv4_hdr_lo)
 _ICMPv4_struct = struct.Struct(_ICMP_hdr_lo)
 
-DEFAULT_TIMEOUT =   2000            # ms
-DEFAULT_INTERVAL =  1000            # ms
+DEFAULT_TIMEOUT =   2000.0/1000.0       # ms
+DEFAULT_INTERVAL =  1000.0/1000.0       # ms
 DEFAULT_PING_PAYLOAD = b"A\x00"
 DEFAULT_RCV_BUFSZ = 1024
 DEFAULT_PAYLOAD_SZ = 1024
@@ -118,6 +118,7 @@ def _make_icmp_packet(
     pad = b"\x00"
     hdr = struct.pack("BBHL", msg_type, msg_code, 0, u32)
     if msg_type == ICMPType.EchoRequest and (len(payload) & 0b1) == 1:
+        # RFC 792 echo request -> checksum
         chksum = _inet_checksum(hdr + payload + pad)
     else:
         chksum = _inet_checksum(hdr + payload)
@@ -127,12 +128,6 @@ def _make_icmp_packet(
 def make_icmp_ping(
         ident: int, seq_num: int, payload: bytes
     ) -> bytes:
-    # PROPOSAL: force input to be 
-    if (len(payload) & 0b1) != 0:
-        # we require the bytes of payload must be multiple of 2 for checksum
-        # calculation, an additional zero is padded if the size is odd.
-        #   (rfc792)
-        raise ValueError("payload must be multiple of 2 bytes.")
     if (len(payload) > DEFAULT_PAYLOAD_SZ):
         raise ValueError(
             ("payload larger than default size limit: {}, large payload may"
@@ -146,7 +141,7 @@ def make_icmp_ping(
 
 def make_simple_ping() -> bytes:
     return make_icmp_ping(
-            os.getpid(), 0, DEFAULT_PING_PAYLOAD
+            0 , 0, DEFAULT_PING_PAYLOAD
         )
 
 def get_icmp_addrif(host: str, version: int) -> Addrinfo:
@@ -286,11 +281,19 @@ class Ping():
             proto_icmp
         )
         self.packet = make_simple_ping()
+        self._icmp_ident = 0
         return
     
     def __del__(self):
         self.sock.close()
         return
+
+    @property
+    def icmp_ident(self):
+        """An auto increment serial number."""
+        self._icmp_ident += 1
+        self._icmp_ident &= 0xFFFFFFFF
+        return self._icmp_ident
 
     def _send_icmp_er(
             self, sockaddr: Sockaddr,
@@ -310,6 +313,7 @@ class Ping():
         icmpv4_cb_res: typing.Any   = None
         ip_pack: IPv4               = None
         icmp_pack: ICMPv4           = None
+        # make packets right before sending?
         try:
             _ = self.sock.sendto(self.packet, sockaddr)
             raw, _ = self.sock.recvfrom(DEFAULT_RCV_BUFSZ)
@@ -328,7 +332,7 @@ class Ping():
 
     def ping_once(
             self, host: str,
-            timeout: int=DEFAULT_TIMEOUT
+            timeout: float=DEFAULT_TIMEOUT
         ) -> typing.Tuple[float, bool]:
         """Simply ping the host."""
         dt  = 0
@@ -338,7 +342,7 @@ class Ping():
         addrif = get_icmp_addrif(host, socket.AF_INET)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
-        with _set_timeout(self.sock, timeout/1000):
+        with _set_timeout(self.sock, timeout):
             dt, _, icmpv4 = self._send_icmp_er(
                 addrif.sockaddr, None, None
             )
@@ -348,8 +352,8 @@ class Ping():
 
     def ping_seq(
             self, host: str, count: int,
-            interval: int,
-            timeout: int=DEFAULT_TIMEOUT
+            interval: float,
+            timeout: float=DEFAULT_TIMEOUT
         ) -> typing.List[typing.Tuple[float, bool]]:
         """Ping host for `count` times with `interval` delay."""
         dt  = 0
@@ -360,8 +364,7 @@ class Ping():
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
         res = list()
-        interval /= 1000
-        with _set_timeout(self.sock, timeout/1000):
+        with _set_timeout(self.sock, timeout):
             for _ in range(count):
                 dt, _, icmpv4 = self._send_icmp_er(addrif.sockaddr, None, None)
                 if icmpv4 is not None and icmpv4.type == ICMPType.EchoReply:
@@ -372,7 +375,7 @@ class Ping():
 
     def _con_send_icmp_er(
             self, pmr_list: typing.List[_PingMultiRecord],
-            timeout: int
+            timeout: float
         ) -> dict:
         """Concurrent icmp echo request sender."""
         packet_sent = 0
@@ -387,20 +390,21 @@ class Ping():
         #   burst ping results in packet loss, it can (probably) be eliminated
         #   by introducing a small amount of delay between each 
         #   packet dispatching.
+        icmp_seq = self.icmp_ident
+        icmp_packet = make_icmp_ping(
+            0, 0, struct.pack("!L", icmp_seq & 0xFFFFFFFF)
+        )
+        packet = icmp_packet
         for pmr in pmr_list:
             addr, _ = pmr.addrinfo.sockaddr
-            _ = self.sock.sendto(self.packet, pmr.addrinfo.sockaddr)
+            _ = self.sock.sendto(packet, pmr.addrinfo.sockaddr)
             addr_pmr_map[addr].packet_record = _PacketRecord()
             packet_sent += 1
             #time.sleep(SEND_DELAY)
-        rem_timeout = timeout/1000
+        rem_timeout = timeout
         rem_recv = packet_sent
         while True:
             t0 = time.perf_counter()
-            # FIXME: seems `select` is not a proper choice if you want to
-            #   measure the delay of multiple host at once.
-            #   use `socket.settimeout` instead?
-            #   or it just impossible to do that?
             r, _, _ = select.select(socket_list, [], [], rem_timeout)
             if r != []:
                 for sock in r:
@@ -413,6 +417,9 @@ class Ping():
                     else:
                         # TODO: parse raw packet and see what happends.
                         print(f"received packet from {addr}, raw:\n{raw}")
+                        icmp = ICMPv4(IPv4(raw).payload)
+                        serial_num = struct.unpack('!L', icmp.payload)
+                        print(f"sn={serial_num} seq={icmp_seq}")
                         pass
                     rem_recv -= 1
                     dt = time.perf_counter() - t0
@@ -429,7 +436,7 @@ class Ping():
 
     def _ping_multi(
             self, host_list: typing.List[str],
-            timeout: int=DEFAULT_TIMEOUT,
+            timeout: float=DEFAULT_TIMEOUT,
             pr_callback: typing.Callable[[_PacketRecord,], typing.Any]=None
         ) -> typing.Dict[str, _PingMultiRecord]:
         """
@@ -444,6 +451,7 @@ class Ping():
                 raise Exception(
                     "{} is probably not a valid address.".format(host)
                 )
+        # PROPOSAL: caching addrif?
         pmr_list = [
             _PingMultiRecord(
                 host, get_icmp_addrif(host, socket.AF_INET)
@@ -472,7 +480,7 @@ class Ping():
 
     def ping_multi(
             self, host_list: typing.List[str],
-            timeout: int=DEFAULT_TIMEOUT,
+            timeout: float=DEFAULT_TIMEOUT,
             mapping: dict=None
         ) -> typing.Dict[str, float]:
         """
