@@ -1,3 +1,4 @@
+import contextlib
 import enum
 import queue
 import statistics
@@ -9,7 +10,6 @@ import typing
 
 from . import (
     ip,
-    rwlock
 )
 
 __all__ = [
@@ -108,6 +108,28 @@ class Monitor():
             pass
         return res_list
 
+    def pause(self):
+        self.sub_msg_q.put(
+            (Code.PAUSE, "")
+        )
+        return
+    
+    def resume(self):
+        self.sub_msg_q.put(
+            (Code.RESUME, "")
+        )
+
+    @contextlib.contextmanager
+    def hold_on(self):
+        self.pause()
+        try:
+            yield
+        except:
+            raise
+        finally:
+            self.resume()
+        return
+
     def _preprocd(self):
         """Process returned result if callback(s) is set."""
         # though python does not capable of multi-threading, cutting job
@@ -136,11 +158,13 @@ class Monitor():
         dt = 0.0
         while True:
             # FIXME: loop until messeges are digested.
-            while not self.sub_msg_q.empty() or len(self.sub_set) == 0:
+            while (not self.sub_msg_q.empty()) or\
+                  (len(self.sub_set) == 0)     or\
+                  not self.is_monitoring:
                 # if we got messege or no host to monitor
                 # assuming it is fast enough.
                 code, host = self.sub_msg_q.get()
-                if code == Code.SUB:
+                if   code == Code.SUB:
                     self.sub_set.add(host)
                 elif code == Code.UNSUB:
                     try:
@@ -149,6 +173,10 @@ class Monitor():
                         # just ignore it
                         pass
                 # TODO: implement `PAUSE` and `RESUME`
+                elif code == Code.PAUSE:
+                    self._is_monitoring = False
+                elif code == Code.RESUME:
+                    self._is_monitoring = True
                 else:
                     pass
                 self.sub_msg_q.task_done()
