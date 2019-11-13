@@ -41,8 +41,6 @@ __all__ = [
     - caching addrinfo results
 """
 
-_IPhdr_test = ">B"
-# first byte of a packet, should contain version info.
 
 _IPv4_hdr_lo = ">BBHHHBBHLL"
 _ICMP_hdr_lo = "BBHHH"
@@ -50,8 +48,23 @@ _ICMP_hdr_lo = "BBHHH"
 _IPv4_struct = struct.Struct(_IPv4_hdr_lo)
 _ICMPv4_struct = struct.Struct(_ICMP_hdr_lo)
 
-DEFAULT_TIMEOUT =   2000.0/1000.0       # ms
-DEFAULT_INTERVAL =  1000.0/1000.0       # ms
+class HeaderStruct(SimpleNamespace):
+    # struct defination
+    _IPv4_hdr_lo        = ">BBHHHBBHLL"
+    _IPv6_hdr_lo        = "!LHBB4L4L"
+    _ICMPv4_hdr_lo      = "BBHHH"
+    _ICMPv6_hdr_lo      = "!BBH"
+    _psuedo_v6_hdr_lo   = "!4L4LLL"
+    # struct instance
+    IPv4        = struct.Struct(_IPv4_hdr_lo)
+    IPv6        = struct.Struct(_IPv6_hdr_lo)
+    ICMPv4      = struct.Struct(_ICMPv4_hdr_lo)
+    ICMPv6      = struct.Struct(_ICMPv6_hdr_lo)
+    Psuedov6    = struct.Struct(_psuedo_v6_hdr_lo)
+
+
+DEFAULT_TIMEOUT =   2000.0/1000.0
+DEFAULT_INTERVAL =  1000.0/1000.0
 DEFAULT_PING_PAYLOAD = b"A\x00"
 DEFAULT_RCV_BUFSZ = 1024
 DEFAULT_PAYLOAD_SZ = 1024
@@ -81,7 +94,14 @@ class ICMPv4Type(SimpleNamespace):
 # _ICMP_table = {i.value: i for i in ICMPv4Type}
 
 class ICMPv6Type(SimpleNamespace):
-    pass
+    # error messages -------------
+    DestinationUnreachable  = 1
+    PacketTooBig            = 2
+    TimeExceeded            = 3
+    ParameterProblem        = 4
+    # information messages -------
+    EchoRequest             = 128
+    EchoReply               = 129
 
 
 def _inet_checksum(data: bytes) -> int:
@@ -99,8 +119,7 @@ def _u32_to_dot(u32: int) -> tuple:
     return struct.unpack(">BBBB", b)
 
 def _get_ip_ver(b: bytes) -> int:
-    u8 = struct.unpack(_IPhdr_test, b[:1])
-    ver = (u8[0] & 0xF0) >> 4
+    ver = (b[0] & 0xF0) >> 4
     return ver
 
 def _is_valid_v4addr(s: str) -> bool:
