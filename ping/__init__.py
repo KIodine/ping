@@ -1,5 +1,5 @@
 from .ip import *
-from .monitor2 import *
+from .monitor import *
 
 __all__ = [
     "Ping",

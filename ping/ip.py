@@ -25,17 +25,20 @@ __all__ = [
 
 """ <TODO>
     - IPv6 compatibility.
+    - use `logging` than naive `print`.
+    - an option of `ping_multi`(and others) for silently handling unresolvable
+      hosts.
 
 
     <PROPOSAL>
     - refining functions.
+    - asyncio version ping
     - a "no exception" version of ping.
-    - `Monitor` class for non-blocking, multiple host status polling.
     - substitute mutiple return value with custom namedtuple
     - Mapping ICMPv4 parse result to Enum.
     - multi-process/multi-thread version
-    - super massive ping(kind of illegal)
-    - customiszble ping payload
+    - support super massive ping(kind of illegal)
+    - caching addrinfo results
 """
 
 _IPhdr_test = ">B"
@@ -68,14 +71,17 @@ Sockaddr = typing.Tuple[typing.Tuple, int]
 # ICMPv4_Callback = typing.Callble[[ICMPv4,], typing.Any]
 
 
-class ICMPType(SimpleNamespace):
+class ICMPv4Type(SimpleNamespace):
     EchoReply               = 0
     DestinationUnreachable  = 3
     SourceQuench            = 4
     RedirectMessage         = 5
     EchoRequest             = 8
     TimeExceeded            = 11
-# _ICMP_table = {i.value: i for i in ICMPType}
+# _ICMP_table = {i.value: i for i in ICMPv4Type}
+
+class ICMPv6Type(SimpleNamespace):
+    pass
 
 
 def _inet_checksum(data: bytes) -> int:
@@ -117,7 +123,7 @@ def _make_icmp_packet(
     ) -> bytes:
     pad = b"\x00"
     hdr = struct.pack("BBHL", msg_type, msg_code, 0, u32)
-    if msg_type == ICMPType.EchoRequest and (len(payload) & 0b1) == 1:
+    if msg_type == ICMPv4Type.EchoRequest and (len(payload) & 0b1) == 1:
         # RFC 792 echo request -> checksum
         chksum = _inet_checksum(hdr + payload + pad)
     else:
@@ -135,7 +141,7 @@ def make_icmp_ping(
         )
     u32_buf = ((ident & 0xFFFF) << 16) & (seq_num & 0xFFFF)
     return _make_icmp_packet(
-            ICMPType.EchoRequest,
+            ICMPv4Type.EchoRequest,
             0, u32_buf, payload
         )
 
@@ -216,6 +222,11 @@ class IPv4():
     # TODO: implement `__repr__` method
 
 
+class IPv6():
+    def __init__(self, b: bytes):
+        return
+
+
 class ICMPv4():
     """Simple ICMPv4 parser only for ping packets."""
     def __init__(self, b: bytes):
@@ -234,6 +245,11 @@ class ICMPv4():
     # TODO: implement `__repr__` method
 
 
+class ICMPv6():
+    def __init__(self, b: bytes):
+        return
+
+
 class _PacketRecord():
     """Auxillary class for package loading and delay calculation."""
     def __init__(self):
@@ -249,7 +265,7 @@ class _PacketRecord():
         self.ip_pack = IPv4(b)
         if self.ip_pack.proto == socket.IPPROTO_ICMP:
             self.icmp_pack = ICMPv4(self.ip_pack.payload)
-            if self.icmp_pack.type == ICMPType.EchoReply:
+            if self.icmp_pack.type == ICMPv4Type.EchoReply:
                 self.is_echo_reply = True
         return
     
@@ -346,7 +362,7 @@ class Ping():
             dt, _, icmpv4 = self._send_icmp_er(
                 addrif.sockaddr, None, None
             )
-            if icmpv4 is not None and icmpv4.type == ICMPType.EchoReply:
+            if icmpv4 is not None and icmpv4.type == ICMPv4Type.EchoReply:
                 suc = True
         return (dt, suc)
 
@@ -367,7 +383,7 @@ class Ping():
         with _set_timeout(self.sock, timeout):
             for _ in range(count):
                 dt, _, icmpv4 = self._send_icmp_er(addrif.sockaddr, None, None)
-                if icmpv4 is not None and icmpv4.type == ICMPType.EchoReply:
+                if icmpv4 is not None and icmpv4.type == ICMPv4Type.EchoReply:
                     suc = True
                 res.append((dt, suc))
                 time.sleep(interval)
@@ -396,7 +412,11 @@ class Ping():
         )
         packet = icmp_packet
         for pmr in pmr_list:
-            addr, _ = pmr.addrinfo.sockaddr
+            if pmr.addrinfo is not None:
+                addr, _ = pmr.addrinfo.sockaddr
+            else:
+                # naturally skip unresolvable hosts.
+                continue
             _ = self.sock.sendto(packet, pmr.addrinfo.sockaddr)
             addr_pmr_map[addr].packet_record = _PacketRecord()
             packet_sent += 1
@@ -437,7 +457,8 @@ class Ping():
     def _ping_multi(
             self, host_list: typing.List[str],
             timeout: float=DEFAULT_TIMEOUT,
-            pr_callback: typing.Callable[[_PacketRecord,], typing.Any]=None
+            pr_callback: typing.Callable[[_PacketRecord,], typing.Any]=None,
+            skip_unknown_hosts=False
         ) -> typing.Dict[str, _PingMultiRecord]:
         """
         Bottom layer of `ping_multi`, accepting a callback for preprocess.
@@ -458,9 +479,10 @@ class Ping():
             )
             for host in host_list
         ]
-        for pmr in pmr_list:
-            if pmr.addrinfo is None:
-                raise Exception("No addrinfo for host: {}".format(pmr.host))
+        if skip_unknown_hosts is False:
+            for pmr in pmr_list:
+                if pmr.addrinfo is None:
+                    raise Exception("No addrinfo for host: {}".format(pmr.host))
         
         _ = self._con_send_icmp_er( # addr_pmr_map
             pmr_list, timeout
@@ -481,7 +503,8 @@ class Ping():
     def ping_multi(
             self, host_list: typing.List[str],
             timeout: float=DEFAULT_TIMEOUT,
-            mapping: dict=None
+            mapping: dict=None,
+            skip_unknown_hosts=False
         ) -> typing.Dict[str, float]:
         """
             Ping multiple hosts at a time, return a dict of host to delay and
@@ -493,7 +516,8 @@ class Ping():
         get_delay_cb = operator.methodcaller("get_delay")
         res = self._ping_multi(
                 host_list, timeout=timeout,
-                pr_callback=get_delay_cb
+                pr_callback=get_delay_cb,
+                skip_unknown_hosts=skip_unknown_hosts
             )
         if mapping is None:
             host_delay_map = {

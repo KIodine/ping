@@ -103,6 +103,7 @@ class Monitor():
         try:
             while True:
                 res = self.res_queue.get_nowait()
+                self.res_queue.task_done()
                 res_list.append(res)
         except queue.Empty:
             pass
@@ -127,7 +128,8 @@ class Monitor():
         except:
             raise
         finally:
-            self.resume()
+            if self.is_monitoring:
+                self.resume()
         return
 
     def _preprocd(self):
@@ -185,7 +187,7 @@ class Monitor():
                 self.sub_set, timeout=self.scan_timeout
             )
             for pmr in pmr_list:
-                # let `_proprocd` handle it.
+                # let `_preprocd` handle it.
                 self.pp_queue.put(pmr)
             dt = time.time() - t0
             if self.scan_interval < dt:

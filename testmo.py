@@ -13,10 +13,11 @@ HOSTS = [
 ]
 
 m = ping.Monitor(1.0, 0.5)
-m.reg_callbacks([ping.monitor2.ping_cb,])
+m.reg_callbacks([ping.monitor.ping_cb,])
 with m.hold_on():
     for host in HOSTS:
         m.subscribe(host)
+m.resume()
 time.sleep(6)
 a = m.get_all()
 #print(a)
