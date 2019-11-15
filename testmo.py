@@ -18,6 +18,6 @@ with m.hold_on():
     for host in HOSTS:
         m.subscribe(host)
 m.resume()
-time.sleep(6)
+time.sleep(300)
 a = m.get_all()
 #print(a)

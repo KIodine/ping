@@ -158,6 +158,8 @@ class Monitor():
         """Ping hosts periodically, put results in `res_queue`"""
         t0 = 0.0
         dt = 0.0
+        put_t0 = 0.0
+        put_dt = 0.0
         while True:
             # FIXME: loop until messeges are digested.
             while (not self.sub_msg_q.empty()) or\
@@ -182,17 +184,24 @@ class Monitor():
                 else:
                     pass
                 self.sub_msg_q.task_done()
-            t0 = time.time()
+            t0 = time.perf_counter()
             pmr_list = self._ping._ping_multi(
                 self.sub_set, timeout=self.scan_timeout
             )
+            dt = time.perf_counter() - t0
+            put_t0 = time.perf_counter()
             for pmr in pmr_list:
                 # let `_preprocd` handle it.
                 self.pp_queue.put(pmr)
-            dt = time.time() - t0
+            put_dt = time.perf_counter() - put_t0
+            # FIXME: why sometimes `dt` is much greater than
+            #        `self.scan_timeout`?
             if self.scan_interval < dt:
                 # minimum scan interval
-                print(f"scan_interval={self.scan_interval} dt={dt}")
+                print(
+                    (f"scan_interval={self.scan_interval} dt={dt},"
+                     f"put_dt={put_dt}")
+                )
                 dt = self.scan_interval * 0.1
             time.sleep(self.scan_interval - dt)
             #del pmr_list
@@ -202,9 +211,8 @@ class Monitor():
 def ping_cb(pmr: ip._PingMultiRecord):
     """Prints typical ping output."""
     print(
-        ("{:15.2f} | From {:15s}({:16s}):"
+        ("From {:15s}({:16s}):"
          " bytes={} ident={:5} TTL={} dt={:.5f}").format(
-            time.time(),
             pmr.addrinfo.sockaddr[0],
             pmr.host,
             len(pmr.packet_record.icmp_pack.payload),

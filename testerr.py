@@ -16,6 +16,13 @@ for d in err_datas:
     checksum = d[chksm_base: chksm_base+2]
     print(struct.unpack("H", checksum))
 
+    print(
+        struct.unpack("!B", d[0:1])[0] >> 4
+    )
     print(ping.ip._inet_checksum(d[:20]))
 
 #ipv4 = ping.IPv4(err_data)
+
+print("---")
+a = ping.ip.make_simple_ping()
+print(ping.ip._inet_checksum(a))
