@@ -25,6 +25,9 @@ p = ping.Ping()
 suc, dt = p.ping_once("www.google.com", 0.5)
 print(suc, dt)
 
+suc, dt = p.ping_once_pmr("www.google.com", 0.5)
+print(suc, dt)
+
 a = p.ping_seq("www.google.com", 4, 0.2, 0.6)
 print(a)
 

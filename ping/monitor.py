@@ -20,7 +20,10 @@ __all__ = [
 
 """
 TODO:
-    - ...
+    - 
+
+PROPOSAL:
+    - add a option/opcode for purging/close res_queue.
 """
 
 """
@@ -38,7 +41,7 @@ provisional process models:
 """
 
 # MNTD_CTL_<code>
-class Code(enum.Enum):
+class Opcode(enum.Enum):
     SUB     = enum.auto()
     UNSUB   = enum.auto()
     PAUSE   = enum.auto()
@@ -78,13 +81,13 @@ class Monitor():
 
     def subscribe(self, host: str):
         self.sub_msg_q.put(
-            (Code.SUB, host)
+            (Opcode.SUB, host)
         )
         return
     
     def cancel(self, host: str):
         self.sub_msg_q.put(
-            (Code.UNSUB, host)
+            (Opcode.UNSUB, host)
         )
         return
     
@@ -111,13 +114,13 @@ class Monitor():
 
     def pause(self):
         self.sub_msg_q.put(
-            (Code.PAUSE, "")
+            (Opcode.PAUSE, "")
         )
         return
     
     def resume(self):
         self.sub_msg_q.put(
-            (Code.RESUME, "")
+            (Opcode.RESUME, "")
         )
 
     @contextlib.contextmanager
@@ -168,18 +171,18 @@ class Monitor():
                 # if we got messege or no host to monitor
                 # assuming it is fast enough.
                 code, host = self.sub_msg_q.get()
-                if   code == Code.SUB:
+                if   code == Opcode.SUB:
                     self.sub_set.add(host)
-                elif code == Code.UNSUB:
+                elif code == Opcode.UNSUB:
                     try:
                         self.sub_set.remove(host)
                     except KeyError:
                         # just ignore it
                         pass
                 # TODO: implement `PAUSE` and `RESUME`
-                elif code == Code.PAUSE:
+                elif code == Opcode.PAUSE:
                     self._is_monitoring = False
-                elif code == Code.RESUME:
+                elif code == Opcode.RESUME:
                     self._is_monitoring = True
                 else:
                     pass
