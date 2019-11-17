@@ -75,23 +75,27 @@ class Monitor():
         return self._is_monitoring
 
     def reg_callbacks(self, callback_list: typing.List[typing.Callable]):
+        """Register callbacks for preprocessing generated results."""
         with self.cb_lock:
             self.callbacks.extend(callback_list)
         return len(callback_list)
 
     def subscribe(self, host: str):
+        """Add host into monitor list."""
         self.sub_msg_q.put(
             (Opcode.SUB, host)
         )
         return
     
     def cancel(self, host: str):
+        """Remove host from monitor list."""
         self.sub_msg_q.put(
             (Opcode.UNSUB, host)
         )
         return
     
     def get(self, block=True, timeout=None):
+        """Retrive one monitor results."""
         try:
             res = self.res_queue.get(block=block, timeout=timeout)
         except:
@@ -101,6 +105,7 @@ class Monitor():
         return res
     
     def get_all(self) -> typing.List:
+        """Retrive all results from queue."""
         res_list    = list()
         res         = None
         try:
@@ -113,18 +118,21 @@ class Monitor():
         return res_list
 
     def pause(self):
+        """Stops monitor temporary."""
         self.sub_msg_q.put(
             (Opcode.PAUSE, "")
         )
         return
     
     def resume(self):
+        """Start/restart monitor service."""
         self.sub_msg_q.put(
             (Opcode.RESUME, "")
         )
 
     @contextlib.contextmanager
     def hold_on(self):
+        """Temporary stop monitor service in a context."""
         self.pause()
         try:
             yield
