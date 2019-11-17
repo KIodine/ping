@@ -379,7 +379,7 @@ def parse_packet6(b: bytes):
 class _PacketRecord():
     """Auxillary class for package loading and delay calculation."""
     def __init__(self):
-        self.send_time      = time.time()
+        self.send_time      = 0.0
         self.recv_time      = float("inf")
         self.ip_pack        = None
         self.icmp_pack      = None
@@ -470,9 +470,11 @@ class Ping():
             self, pmr: _PingMultiRecord,
         ):
         pr  = _PacketRecord()
+        pr.send_time = time.time()
         if pmr.addrinfo.family == socket.AF_INET:
             sock = self.sock
         else:
+            # or what else can it be?
             sock = self.sockv6
         try:
             _ = sock.sendto(self.packet, pmr.addrinfo.sockaddr[:2])
@@ -548,6 +550,26 @@ class Ping():
                 time.sleep(interval)
         return res
 
+    def ping_seq_pmr(
+            self, host: str, count: int,
+            interval: float, timeout: float=DEFAULT_TIMEOUT
+        ) -> typing.List[typing.Tuple[bool, float]]:
+        addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
+        if addrif is None:
+            raise Exception("No addrinfo for host: {}".format(host))
+        res = list()
+        pmr = _PingMultiRecord(host, addrif)
+        pr: _PacketRecord = None
+        with _set_timeout(self.sock, timeout):
+            for _ in range(count):
+                self._send_icmp_er_pmr(pmr)
+                pr = pmr.packet_record
+                res.append(
+                    (pr.is_echo_reply, pr.get_delay())
+                )
+                time.sleep(interval)
+        return res
+
     def _con_send_icmp_er(
             self, pmr_list: typing.List[_PingMultiRecord],
             timeout: float
@@ -572,6 +594,7 @@ class Ping():
             0, 0, struct.pack("!L", icmp_seq & 0xFFFFFFFF)
         )
         packet = icmp_packet
+        pr: _PacketRecord = None
         for pmr in pmr_list:
             ai = pmr.addrinfo
             if ai is None:
@@ -586,7 +609,9 @@ class Ping():
                 self.sockv6.sendto(packet, ai.sockaddr[:2])
             else:
                 pass
-            addr_pmr_map[addr].packet_record = _PacketRecord()
+            pr = _PacketRecord()        # new pr
+            pr.send_time = time.time()
+            addr_pmr_map[addr].packet_record = pr
             packet_sent += 1
             #time.sleep(SEND_DELAY)
 
