@@ -192,6 +192,7 @@ def make_icmp_ping(
         )
 
 def make_simple_ping() -> bytes:
+    """Make ping message with default payload."""
     return make_icmp_ping(
             0 , 0, DEFAULT_PING_PAYLOAD
         )
@@ -234,6 +235,7 @@ def get_icmp_addrif(host: str, version: int) -> Addrinfo:
 
 @contextmanager
 def _set_timeout(socket: socket.socket, timeout: float):
+    """Set timeout of the socket and restore."""
     old_timeout = socket.gettimeout()
     socket.settimeout(timeout)
     try:
@@ -286,6 +288,7 @@ class IPv4():
 
 
 class IPv6():
+    """Simple IPv6 packet parser."""
     def __init__(self, b: bytes):
         ver = _get_ip_ver(b)
         if ver != 6:
@@ -431,41 +434,6 @@ class Ping():
         self._icmp_ident &= 0xFFFFFFFF
         return self._icmp_ident
 
-    def _send_icmp_er(
-            self, sockaddr: Sockaddr,
-            ipv4_callback: typing.Callable,
-            icmpv4_callback: typing.Callable
-        ) -> typing.Tuple[float, typing.Any, typing.Any]:
-        """ Low level ping function.
-            Accept two callbacks for both IPv4 and ICMPv4 packets, returning
-            time cost and results of corresponding callback.
-            Note that `icmpv4_callback` will be called only if IPv4 packet
-            contains correct ICMPv4 packet.
-        """
-        # NOTE: seems callbacks are some kind of redundant.
-        t0 = time.perf_counter()
-        dt = 0.0
-        ipv4_cb_res: typing.Any     = None
-        icmpv4_cb_res: typing.Any   = None
-        ip_pack: IPv4               = None
-        icmp_pack: ICMPv4           = None
-        # make packets right before sending?
-        try:
-            _ = self.sock.sendto(self.packet, sockaddr)
-            raw, _ = self.sock.recvfrom(DEFAULT_RCV_BUFSZ)
-            dt = time.perf_counter() - t0
-            ip_pack = IPv4(raw)
-            ipv4_cb_res = ipv4_callback(ip_pack) if ipv4_callback is not None\
-                else ip_pack
-            if ip_pack.proto == socket.IPPROTO_ICMP:
-                icmp_pack = ICMPv4(ip_pack.payload)
-                icmpv4_cb_res = icmpv4_callback(icmp_pack) \
-                    if icmpv4_callback is not None\
-                    else icmp_pack
-        except socket.timeout:
-            dt = float("NaN")
-        return (dt, ipv4_cb_res, icmpv4_cb_res)
-
     def _send_icmp_er_pmr(
             self, pmr: _PingMultiRecord,
         ):
@@ -499,9 +467,10 @@ class Ping():
         pmr.packet_record = pr
         return
 
-    def ping_once_pmr(
+    def ping_once(
             self, host: str, timeout: float=DEFAULT_TIMEOUT
         ) -> typing.Tuple[bool, float]:
+        """Ping host once."""
         addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
@@ -511,49 +480,11 @@ class Ping():
         pr = pmr.packet_record
         return (pr.is_echo_reply, pr.get_delay())
 
-    def ping_once(
-            self, host: str,
-            timeout: float=DEFAULT_TIMEOUT
-        ) -> typing.Tuple[float, bool]:
-        """Simply ping the host."""
-        dt  = 0
-        suc = False
-        addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
-        if addrif is None:
-            raise Exception("No addrinfo for host: {}".format(host))
-        with _set_timeout(self.sock, timeout):
-            dt, _, icmpv4 = self._send_icmp_er(
-                addrif.sockaddr[:2], None, None
-            )
-            if icmpv4 is not None and icmpv4.type == ICMPv4Type.EchoReply:
-                suc = True
-        return (dt, suc)
-
     def ping_seq(
-            self, host: str, count: int,
-            interval: float,
-            timeout: float=DEFAULT_TIMEOUT
-        ) -> typing.List[typing.Tuple[float, bool]]:
-        """Ping host for `count` times with `interval` delay."""
-        dt  = 0
-        suc = False
-        addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
-        if addrif is None:
-            raise Exception("No addrinfo for host: {}".format(host))
-        res = list()
-        with _set_timeout(self.sock, timeout):
-            for _ in range(count):
-                dt, _, icmpv4 = self._send_icmp_er(addrif.sockaddr, None, None)
-                if icmpv4 is not None and icmpv4.type == ICMPv4Type.EchoReply:
-                    suc = True
-                res.append((dt, suc))
-                time.sleep(interval)
-        return res
-
-    def ping_seq_pmr(
             self, host: str, count: int,
             interval: float, timeout: float=DEFAULT_TIMEOUT
         ) -> typing.List[typing.Tuple[bool, float]]:
+        """Ping host for `count` times with specific interval."""
         addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
