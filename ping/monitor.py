@@ -1,5 +1,6 @@
 import contextlib
 import enum
+import logging
 import queue
 import statistics
 import sys
@@ -11,6 +12,7 @@ import typing
 from . import (
     ip,
 )
+from .logger import get_logger as pget_logger
 
 __all__ = [
     "Monitor",
@@ -35,10 +37,14 @@ provisional process models:
     1. ping results -> preprocess results -> result queue
     2. ping results -> callback -> result queue
     for python: void (*cb)(_PacketRecord*) # python has `functools.partial`.
-    for C:      void (*cb)(void*, _PacketRecord*)
+    for C:      void (*cb)(void*, _PacketRecord const*)
     one can pass a callback for remote report, database recording, dump csv and
     json ... etc.
 """
+
+mlog: logging.Logger = pget_logger().getChild("monitor")
+
+PMR_Callback = typing.Callable[[ip._PingMultiRecord,], None]
 
 # MNTD_CTL_<code>
 class Opcode(enum.Enum):
@@ -62,7 +68,11 @@ class Monitor():
         #self.notify_lock    = threading.Lock()
         #self.sub_notify     = threading.Condition(self.notify_lock)
         self._ping          = ip.Ping()
-        self.callbacks      = list()
+        self.pmr_passes     = list()
+        # the final function pmr passes to, given the power of modifying
+        # contents of pmr.
+        self.pmr_endpoint   = self.res_queue.put
+        self._is_endpoint_open = True
         # starts daemons.
         self._mntd = threading.Thread(target=self._monitord, daemon=True)
         self._prpd = threading.Thread(target=self._preprocd, daemon=True)
@@ -74,11 +84,39 @@ class Monitor():
     def is_monitoring(self) -> bool:
         return self._is_monitoring
 
-    def reg_callbacks(self, callback_list: typing.List[typing.Callable]):
-        """Register callbacks for preprocessing generated results."""
+    @property
+    def is_endpoint_open(self) -> bool:
+        return self._is_endpoint_open
+
+    def reg_pmr_passes(
+            self, pmr_pass_list: typing.List[PMR_Callback]
+        ) -> int:
+        """Register pmr_passes for preprocessing generated results."""
         with self.cb_lock:
-            self.callbacks.extend(callback_list)
-        return len(callback_list)
+            self.pmr_passes.extend(pmr_pass_list)
+        return len(pmr_pass_list)
+
+    def reg_pmr_endpoint(
+            self, pmr_pass_end: PMR_Callback
+        ):
+        """Register a pmr_pass callback as endpoint."""
+        self.pmr_endpoint = pmr_pass_end
+        return
+
+    def reset_pmr_endpoint(self):
+        """Reset pmr endpoint to its default value."""
+        self.pmr_endpoint = self.res_queue.put
+        return
+    
+    def open_pmr_endpoint(self):
+        """"""
+        self._is_endpoint_open = True
+        return
+
+    def close_pmr_endpoint(self):
+        """"""
+        self._is_endpoint_open = False
+        return
 
     def subscribe(self, host: str):
         """Add host into monitor list."""
@@ -145,14 +183,14 @@ class Monitor():
 
     def _preprocd(self):
         """Process returned result if callback(s) is set."""
-        # though python does not capable of multi-threading, cutting job
+        # though python does not capable of "real" multi-threading, cutting job
         # like this may increase the flexibility of futher programming project.
         while True:
             pmr = self.pp_queue.get()
             try:
                 # pass `pmr`(_PingMultiRecord) to each callback.
                 with self.cb_lock:
-                    for cb in self.callbacks:
+                    for cb in self.pmr_passes:
                         cb(pmr)
                     pass
             except:
@@ -162,7 +200,8 @@ class Monitor():
                 pass
             finally:
                 self.pp_queue.task_done()
-                self.res_queue.put(pmr)
+                if self.is_endpoint_open is True:
+                    self.pmr_endpoint(pmr)
         return
 
     def _monitord(self):
@@ -173,9 +212,9 @@ class Monitor():
         put_dt = 0.0
         while True:
             # FIXME: loop until messeges are digested.
-            while (not self.sub_msg_q.empty()) or\
-                  (len(self.sub_set) == 0)     or\
-                  not self.is_monitoring:
+            while (not self.sub_msg_q.empty()) or \
+                  (len(self.sub_set) == 0)     or \
+                  (not self.is_monitoring):
                 # if we got messege or no host to monitor
                 # assuming it is fast enough.
                 code, host = self.sub_msg_q.get()
@@ -187,7 +226,6 @@ class Monitor():
                     except KeyError:
                         # just ignore it
                         pass
-                # TODO: implement `PAUSE` and `RESUME`
                 elif code == Opcode.PAUSE:
                     self._is_monitoring = False
                 elif code == Opcode.RESUME:
@@ -209,7 +247,7 @@ class Monitor():
             #        `self.scan_timeout`?
             if self.scan_interval < dt:
                 # minimum scan interval
-                print(
+                mlog.debug(
                     (f"scan_interval={self.scan_interval} dt={dt},"
                      f"put_dt={put_dt}")
                 )

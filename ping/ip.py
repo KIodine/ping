@@ -35,7 +35,7 @@ __all__ = [
             - `_send_icmp_er`
             - `_con_send_icmp_er`
             - `_ping_multi`
-    - use `logging` than naive `print`.
+    - use `logging` than naive `print`.(DONE)
     - an option of `ping_multi`(and others) for silently handling unresolvable
       hosts.
     - investigate why sometimes `_ping_multi` got huge delay.
@@ -420,7 +420,9 @@ class Ping():
         )
         self.packet         = make_simple_ping()
         self._icmp_ident    = 0
-        self._addrif_cache: typing.Dict[str, Addrinfo] = dict()
+        self._addrif_cache: \
+            typing.Dict[str, typing.Tuple[Addrinfo, int]] = dict()
+        self._max_age = 300 
         return
     
     def __del__(self):
@@ -629,13 +631,18 @@ class Ping():
         # PROPOSAL: caching addrif?(ACCEPTED -> DONE)
         pmr_list = list()
         # NOTE: we need a cache expiration mechanism.
+        now = time.time()
         for host in host_list:
             if host in self._addrif_cache.keys():
-                addrif = self._addrif_cache[host]
+                addrif, create = self._addrif_cache[host]
+                if (create + self._max_age) > now:
+                    addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
+                    self._addrif_cache[host] = (addrif, time.time())
             else:
-                # There is (probably) no way for finer-grained control unless
-                # we change the API.
                 addrif = get_icmp_addrif(host, socket.AF_UNSPEC)
+                self._addrif_cache[host] = (addrif, time.time())
+            # There is (probably) no way for finer-grained control unless
+            # we change the API.
             pmr_list.append(
                 _PingMultiRecord(host, addrif)
             )
