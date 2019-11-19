@@ -19,10 +19,10 @@ for d in err_datas:
     print(
         struct.unpack("!B", d[0:1])[0] >> 4
     )
-    print(ping.ip._inet_checksum(d[:20]))
+    print(ping.ip.inet_checksum(d[:20]))
 
 #ipv4 = ping.IPv4(err_data)
 
 print("---")
 a = ping.ip.make_simple_ping()
-print(ping.ip._inet_checksum(a))
+print(ping.ip.inet_checksum(a))

@@ -10,6 +10,7 @@ import time
 import typing
 
 from . import (
+    ping,
     ip,
 )
 from .logger import get_logger as pget_logger
@@ -44,7 +45,7 @@ provisional process models:
 
 mlog: logging.Logger = pget_logger().getChild("monitor")
 
-PMR_Callback = typing.Callable[[ip._PingMultiRecord,], None]
+PMR_Callback = typing.Callable[[ping._PingMultiRecord,], None]
 
 # MNTD_CTL_<code>
 class Opcode(enum.Enum):
@@ -67,7 +68,7 @@ class Monitor():
         self.sub_set        = set()
         #self.notify_lock    = threading.Lock()
         #self.sub_notify     = threading.Condition(self.notify_lock)
-        self._ping          = ip.Ping()
+        self._ping          = ping.Ping()
         self.pmr_passes     = list()
         # the final function pmr passes to, given the power of modifying
         # contents of pmr.
@@ -257,14 +258,15 @@ class Monitor():
         return
 
 
-def ping_cb(pmr: ip._PingMultiRecord):
+def ping_cb(pmr: ping._PingMultiRecord):
     """Prints typical ping output."""
+    _, _, payload = pmr.packet_record.icmp_pack.as_echo_reply4()
     print(
         ("From {:15s}({:16s}):"
          " bytes={} ident={:5} TTL={} dt={:.5f}").format(
             pmr.addrinfo.sockaddr[0],
             pmr.host,
-            len(pmr.packet_record.icmp_pack.payload),
+            len(payload),
             pmr.packet_record.ip_pack.ident,
             pmr.packet_record.ip_pack.ttl,
             (pmr.packet_record.recv_time-pmr.packet_record.send_time),
