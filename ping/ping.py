@@ -153,6 +153,9 @@ class _PingMultiRecord():
 class Ping():
     def __init__(self):
         proto_icmp  = socket.getprotobyname("icmp")
+        self.sock   = None
+        self.sockv6 = None
+
         self.sock   = socket.socket(
             socket.AF_INET,
             socket.SOCK_RAW,
@@ -171,7 +174,8 @@ class Ping():
         return
     
     def __del__(self):
-        self.sock.close()
+        self.sock.close()   if self.sock    is not None else ()
+        self.sockv6.close() if self.sockv6  is not None else ()
         return
 
     @property
