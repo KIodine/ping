@@ -5,6 +5,11 @@
 The ping library is inspired by [MultiPing](https://github.com/romana/multi-ping) and as a practice to raw socket and ICMP/IP of my own.
 
 ## Table of Contents
+- Features(#Features)
+- Install(#Install)
+- Example(#Example)
+- Requirements(#Requirements)
+- License(#License)
 
 ## Features
 - Pure python implementation, no 3rd party library is required.

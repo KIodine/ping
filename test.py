@@ -15,11 +15,11 @@ ipv4 = ping.IPv4(test)
 icmpv4 = ping.ICMPv4(ipv4.payload)
 
 print(ipv4.src, ipv4.dst, ipv4.rem, ipv4.size)
-print(icmpv4.payload)
+print(icmpv4.msg_body)
 
 a = ping.ip.make_simple_ping()
 icmp2 = ping.ICMPv4(a)
-print("checksum: ", ping.ip._inet_checksum(a))
+print("checksum: ", ping.ip.inet_checksum(a))
 
 p = ping.Ping()
 
