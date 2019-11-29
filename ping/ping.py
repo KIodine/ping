@@ -1,7 +1,9 @@
 import array
 import logging
+import math
 import operator
 import os
+import random
 import select
 import socket
 import struct
@@ -44,7 +46,6 @@ __all__ = [
 
 
     <PROPOSAL>
-    - refining functions.
     - asyncio version ping
     - a "no exception" version of ping.
     - substitute mutiple return value with custom namedtuple
@@ -53,6 +54,8 @@ __all__ = [
     - support super massive ping(kind of illegal)
     - caching addrinfo results(DONE)
     - multi-socket ping
+    - tracking passing routers and route pathes, emit callback when
+      route changes.
 """
 
 plog: logging.Logger = pget_logger().getChild("ping")
@@ -112,17 +115,25 @@ def get_icmp_addrif(host: str, version: int) -> Addrinfo:
     return addrif
 
 @contextmanager
-def _set_timeout(socket: socket.socket, timeout: float):
+def _set_timeout(sock: socket.socket, timeout: float):
     """Set timeout of the socket and restore."""
-    old_timeout = socket.gettimeout()
-    socket.settimeout(timeout)
+    old_timeout = sock.gettimeout()
+    sock.settimeout(timeout)
     try:
         yield
     finally:
         # restore timeout anyway.
-        socket.settimeout(old_timeout)
+        sock.settimeout(old_timeout)
     return
 
+@contextmanager
+def _save_ttl(sock: socket.socket):
+    old_ttl = sock.getsockopt(socket.SOL_IP, socket.IP_TTL)
+    try:
+        yield
+    finally:
+        sock.setsockopt(socket.SOL_IP, socket.IP_TTL, old_ttl)
+    return
 
 class _PacketRecord():
     """Auxillary class for package loading and delay calculation."""
@@ -135,7 +146,7 @@ class _PacketRecord():
         return
 
     def get_delay(self) -> float:
-        if self.ip_pack is not None and self.is_echo_reply is True:
+        if self.ip_pack is not None:
             return self.recv_time - self.send_time
         return float("NaN")
 
@@ -145,7 +156,7 @@ class _PingMultiRecord():
     def __init__(self, host: str, addrif: Addrinfo):
         self.host       = host
         self.addrinfo   = addrif
-        self.packet_record: _PacketRecord   = None
+        self.packet_record: _PacketRecord   = _PacketRecord()
         self.res: typing.Any                = None
         return
 
@@ -153,17 +164,23 @@ class _PingMultiRecord():
 class Ping():
     def __init__(self):
         proto_icmp  = socket.getprotobyname("icmp")
+        self.sock   = None
+        self.sockv6 = None
+
         self.sock   = socket.socket(
             socket.AF_INET,
             socket.SOCK_RAW,
             proto_icmp
         )
+        self.sock.bind(("0.0.0.0", 0))
         self.sockv6 = socket.socket(
             socket.AF_INET6,
             socket.SOCK_RAW,
             _IPPRPTO_ICMPv6
         )
+        self.sockv6.bind(("::", 0))
         self.packet         = ip.make_simple_ping()
+
         self._icmp_ident    = 0
         self._addrif_cache: \
             typing.Dict[str, typing.Tuple[Addrinfo, int]] = dict()
@@ -171,28 +188,43 @@ class Ping():
         return
     
     def __del__(self):
-        self.sock.close()
+        self.sock.close()   if self.sock    is not None else ()
+        self.sockv6.close() if self.sockv6  is not None else ()
         return
 
     @property
-    def icmp_ident(self):
-        """An auto increment serial number."""
+    def icmp_seq(self):
+        """An auto increment sequence number."""
         self._icmp_ident += 1
-        self._icmp_ident &= 0xFFFFFFFF
+        self._icmp_ident &= 0xFFFF
         return self._icmp_ident
 
+    @property
+    def icmp_ident(self):
+        """Generate random uint16_t for identity use."""
+        return random.randint(0, 0xFFFF)
+
+    @property
+    def rand_uint32(self):
+        return random.randint(0, 0xFFFFFFFF)
+
     def _send_icmp_er_pmr(
-            self, pmr: _PingMultiRecord,
-        ):
-        pr  = _PacketRecord()
+            self, pmr: _PingMultiRecord
+        ) -> int:
+        ret = 0
+        pr = pmr.packet_record
         pr.send_time = time.time()
+        icmp_packet = ip.make_icmp_ping(
+            self.icmp_ident, self.icmp_seq,
+            struct.pack("!L", self.rand_uint32)
+        )
         if pmr.addrinfo.family == socket.AF_INET:
             sock = self.sock
         else:
             # or what else can it be?
             sock = self.sockv6
         try:
-            _ = sock.sendto(self.packet, pmr.addrinfo.sockaddr[:2])
+            _ = sock.sendto(icmp_packet, pmr.addrinfo.sockaddr[:2])
             raw, _ = sock.recvfrom(DEFAULT_RCV_BUFSZ)
             ip_pack, icmp = ip.parse_packet(raw)
             is_er = ip.is_icmp_echo_reply(raw)
@@ -201,9 +233,9 @@ class Ping():
             pr.icmp_pack        = icmp
             pr.is_echo_reply    = is_er
         except socket.timeout:
+            ret = -1
             pass
-        pmr.packet_record = pr
-        return
+        return ret
 
     def ping_once(
             self, host: str, timeout: float=DEFAULT_TIMEOUT
@@ -245,7 +277,7 @@ class Ping():
         ) -> dict:
         """Concurrent icmp echo request sender."""
         packet_sent = 0
-        # in C we'll use BST or hash table.
+        # in C we'll use BST or hash table, or can we eliminate the need?
         addr_pmr_map = {
             pmr.addrinfo.sockaddr[0]: pmr
             for pmr in pmr_list
@@ -257,14 +289,16 @@ class Ping():
         #   burst ping results in packet loss, it can (probably) be eliminated
         #   by introducing a small amount of delay between each 
         #   packet dispatching.
-        icmp_seq = self.icmp_ident
+        icmp_seq = self.rand_uint32
         # Identify each packet using echo reply message body field.
         icmp_packet = ip.make_icmp_ping(
-            0, 0, struct.pack("!L", icmp_seq & 0xFFFFFFFF)
+            self.icmp_ident, self.icmp_seq,
+            struct.pack("!L", icmp_seq)
         )
         packet = icmp_packet
         pr: _PacketRecord = None
         for pmr in pmr_list:
+            pr = pmr.packet_record
             ai = pmr.addrinfo
             if ai is None:
                 continue
@@ -278,9 +312,7 @@ class Ping():
                 self.sockv6.sendto(packet, ai.sockaddr[:2])
             else:
                 pass
-            pr = _PacketRecord()        # new pr
             pr.send_time = time.time()
-            addr_pmr_map[addr].packet_record = pr
             packet_sent += 1
             #time.sleep(SEND_DELAY)
 
@@ -355,9 +387,6 @@ class Ping():
         Bottom layer of `ping_multi`, accepting a callback for preprocess.
         If callback is `None`, the raw `_PacketRecord` instance is exposed.
         """
-        # host -> addr -> PacketRecord
-        # PROPOSAL: An optional parameter of a dict for storing result,
-        #   saving memory and construction time.
         addrif: Addrinfo = None
         # PROPOSAL: caching addrif?(ACCEPTED -> DONE)
         pmr_list = list()
@@ -421,3 +450,50 @@ class Ping():
                 host_delay_map[pmr.host] = pmr.res
         
         return host_delay_map
+
+    def tracert(
+            self, host: str, timeout: float, max_hops: int
+        ) -> typing.List[typing.Tuple[str, str, float]]:
+        # basically increase ttl from 1 until target host is reached.
+        # what if we send all packages at once?
+
+        res_list = list()
+        ai = get_icmp_addrif(host, socket.AF_INET)
+        assert ai is not None
+        assert max_hops > 0 and max_hops <= 255
+        assert ai.family == socket.AF_INET
+        assert timeout > 0.0
+        
+        plog.debug(f"Destination is {ai.sockaddr[0]}")
+
+        pmr = _PingMultiRecord(host, ai)
+        pr = pmr.packet_record
+
+        with _set_timeout(self.sock, timeout), _save_ttl(self.sock):
+            for i in range(1, max_hops+1):
+                self.sock.setsockopt(socket.SOL_IP, socket.IP_TTL, i)
+                assert self.sock.getsockopt(socket.SOL_IP, socket.IP_TTL) == i
+                
+                r = self._send_icmp_er_pmr(pmr)
+                dt = pr.get_delay()
+                if r == -1:
+                    ret_src     = ""
+                    hostname    = ""
+                    dt          = math.nan
+                else:
+                    ret_src = ".".join(map(str, pr.ip_pack.src))
+                    # FIXME: make IP leave this field raw.
+                    hostname, _ = socket.getnameinfo((ret_src, 0), 0)
+
+                triple = (hostname, ret_src, dt)
+                print(
+                    triple, ret_src,
+                )
+                res_list.append(triple)
+                if ret_src == ai.sockaddr[0]:
+                    plog.debug("Destination reached.")
+                    break
+                time.sleep(0.02)
+            pass
+        return res_list
+

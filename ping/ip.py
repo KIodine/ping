@@ -36,11 +36,11 @@ class Defaults(SimpleNamespace):
 class HeaderStruct(SimpleNamespace):
     # struct defination -----------------------------
     _IPv4_hdr_lo        = "!BBHHHBBHLL"
-    _IPv6_hdr_lo        = "!LHBB16p16p"
+    _IPv6_hdr_lo        = "!LHBB16s16s"
     _ICMPv4_hdr_lo      = "!BBH"
     _ICMPv6_hdr_lo      = "!BBH"
-    _psuedo_v6_hdr_lo   = "!16p16pLL"
-    _general_icmp_lo    = "!BBH4p"
+    _psuedo_v6_hdr_lo   = "!16s16sLL"
+    _general_icmp_lo    = "!BBH4s"
     # ICMPv4
     _v4_echo_reply       = "!HH"
     # ICMPv6
@@ -246,7 +246,8 @@ def is_icmp_echo_reply(raw: bytes):
 def parse_packet4(b: bytes):
     ip_pack = IPv4(b)
     if ip_pack.proto != socket.IPPROTO_ICMP:
-        return
+        plog.debug(f"ip proto={ip_pack.proto}, raw={ip_pack.payload}")
+        return (ip_pack, None)
     chksum = inet_checksum(ip_pack.payload)
     if chksum != 0:
         plog.error("Checksum error")
@@ -255,8 +256,9 @@ def parse_packet4(b: bytes):
 
 def parse_packet6(b: bytes):
     ip_pack = IPv6(b)
-    if ip_pack.next_header != socket.IPPROTO_ICMP:
-        return
+    if ip_pack.next_header != _IPPROTO_ICMPv6:
+        plog.debug(f"ip proto={ip_pack.next_header}, raw={ip_pack.payload}")
+        return (ip_pack, None)
     chksum = inet_checksum(
         ip_pack.make_psuedo_hdr(ip_pack.payload_length) + \
         ip_pack.payload

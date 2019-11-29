@@ -110,12 +110,12 @@ class Monitor():
         return
     
     def open_pmr_endpoint(self):
-        """"""
+        """Allow endpoint to receive PMR."""
         self._is_endpoint_open = True
         return
 
     def close_pmr_endpoint(self):
-        """"""
+        """Disallow endpoint to receive PMR."""
         self._is_endpoint_open = False
         return
 
