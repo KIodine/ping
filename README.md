@@ -32,6 +32,20 @@ success, dt = p.ping_once(host, timeout=timeout)
 suc_dt_list = p.ping_seq(host, timeout=timeout, interval=interval)
 host_dt_map = p.ping_multi([host,], timeout=timeout)
 ```
+
+### tracert
+:::warning
+`tracert` function is currently only work on linux.
+You may need to configure firewall to enable this feature.
+:::
+```=
+import ping
+host = "www.google.com"
+timeout = 0.5
+max_hops = 30
+route_list = ping.tracert(host, timeout, max_hops)
+```
+
 ### startup monitor service
 ```=
 import ping
