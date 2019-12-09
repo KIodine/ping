@@ -69,7 +69,7 @@ class Monitor():
         #self.notify_lock    = threading.Lock()
         #self.sub_notify     = threading.Condition(self.notify_lock)
         self._ping          = ping.Ping()
-        self.pmr_passes     = list()
+        self.pmr_passes     = set()
         # the final function pmr passes to, given the power of modifying
         # contents of pmr.
         self.pmr_endpoint   = self.res_queue.put
@@ -94,8 +94,19 @@ class Monitor():
         ) -> int:
         """Register pmr_passes for preprocessing generated results."""
         with self.cb_lock:
-            self.pmr_passes.extend(pmr_pass_list)
+            for passes in pmr_pass_list:
+                self.pmr_passes.add(passes)
         return len(pmr_pass_list)
+
+    def reg_pmr_pass(self, pass_func):
+        with self.cb_lock:
+            self.pmr_passes.add(pass_func)
+        return
+    
+    def dereg_pmr_pass(self, pass_func):
+        with self.cb_lock:
+            self.pmr_passes.remove(pass_func)
+        return
 
     def reg_pmr_endpoint(
             self, pmr_pass_end: PMR_Callback
@@ -183,7 +194,7 @@ class Monitor():
         return
 
     def _preprocd(self):
-        """Process returned result if callback(s) is set."""
+        """Process queued result if callback(s) is set."""
         # though python does not capable of "real" multi-threading, cutting job
         # like this may increase the flexibility of futher programming project.
         while True:
@@ -194,10 +205,11 @@ class Monitor():
                     for cb in self.pmr_passes:
                         cb(pmr)
                     pass
-            except:
+            except Exception as exc:
                 # TODO: more verbose exception handling, ex:
                 #   - function name
                 #   - exception type
+                mlog.error(exc)
                 pass
             finally:
                 self.pp_queue.task_done()

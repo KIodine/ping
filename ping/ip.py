@@ -130,6 +130,20 @@ def make_icmp_ping(
             0, u32_buf, payload
         )
 
+def make_icmpv6_ping(
+        ident: int, seq_num: int, payload: bytes
+    ) -> bytes:
+    if (len(payload) > Defaults.MaxPayloadSize):
+        raise ValueError(
+            ("payload larger than default size limit: {}, large payload may"
+             "results in IP packet fragment.").format(Defaults.MaxPayloadSize)
+        )
+    u32_buf = struct.pack("!HH", ident & 0xFFFF, seq_num & 0xFFFF)
+    return make_icmp_packet(
+            ICMPv6Type.EchoRequest,
+            0, u32_buf, payload
+        )
+
 def make_simple_ping() -> bytes:
     """Make ping message with default payload."""
     return make_icmp_ping(
@@ -277,4 +291,4 @@ def parse_packet(b: bytes) -> tuple:
         return parse_packet6(b)
     else:
         pass
-    return
+    return (None, None)
