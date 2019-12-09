@@ -1,6 +1,9 @@
 import ping
 
 HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
     "www.google.com",
     "www.gmail.com",
     "www.youtube.com",

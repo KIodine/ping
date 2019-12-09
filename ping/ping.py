@@ -36,11 +36,13 @@ __all__ = [
             - `_send_icmp_er`
             - `_con_send_icmp_er`
             - `_ping_multi`
+        - We must admit that IPv6 is a whole lot different thing than
+          old IPv4, so further clarifacation is required.
     - use `logging` than naive `print`.(DONE)
     - an option of `ping_multi`(and others) for silently handling unresolvable
       hosts.
     - investigate why sometimes `_ping_multi` got huge delay.
-    - seperate class `Ping` to `ping.py`
+    - seperate class `Ping` to `ping.py`(DONE)
     - add `as_<ICMP msg type>` method for flexible data intepretation.
     - support ICMP `TimeExceed` message, or further, all icmp messages.
 
@@ -61,7 +63,8 @@ __all__ = [
 plog: logging.Logger = pget_logger().getChild("ping")
 
 
-_IPPRPTO_ICMPv6 = 58    # python win32 doesn't have this defined.
+_IPPROTO_ICMPv6 = 58    # python win32 doesn't have this defined.
+
 
 DEFAULT_TIMEOUT =   2000.0/1000.0
 DEFAULT_INTERVAL =  1000.0/1000.0
@@ -89,13 +92,15 @@ def get_icmp_addrif(host: str, version: int) -> Addrinfo:
         version != socket.AF_INET6 and \
         version != socket.AF_UNSPEC:
         raise Exception("{} is not a valid IP version".format(version))
+    icmp_proto = socket.IPPROTO_ICMP if version == socket.AF_INET \
+        else _IPPROTO_ICMPv6
     try:
         # NOTE: use empty string for cross-platform.
         ai = socket.getaddrinfo(
             host, "",
             version,
             socket.SOCK_RAW,
-            socket.getprotobyname("ICMP"),
+            icmp_proto,
             socket.AI_CANONNAME
         )
     except socket.gaierror:
@@ -139,16 +144,17 @@ class _PacketRecord():
     """Auxillary class for package loading and delay calculation."""
     def __init__(self):
         self.send_time      = 0.0
-        self.recv_time      = float("inf")
+        self.recv_time      = -math.inf # so `get_delay` works
         self.ip_pack        = None
         self.icmp_pack      = None
         self.is_echo_reply  = False
         return
 
     def get_delay(self) -> float:
-        if self.ip_pack is not None:
-            return self.recv_time - self.send_time
-        return float("NaN")
+        dt =  self.recv_time - self.send_time
+        if dt < 0.0:
+            return math.nan
+        return dt
 
 
 class _PingMultiRecord():
@@ -172,22 +178,21 @@ class Ping():
             socket.SOCK_RAW,
             proto_icmp
         )
-        self.sock.bind(("0.0.0.0", 0))
+        #self.sock.bind(("0.0.0.0", 0))
         self.sockv6 = socket.socket(
             socket.AF_INET6,
             socket.SOCK_RAW,
-            _IPPRPTO_ICMPv6
+            _IPPROTO_ICMPv6
         )
-        self.sockv6.bind(("::", 0))
-        self.packet         = ip.make_simple_ping()
-
+        #self.sockv6.bind(("::", 0))
         self._icmp_ident    = 0
         self._addrif_cache: \
             typing.Dict[str, typing.Tuple[Addrinfo, int]] = dict()
-        self._max_age = 300 
+        self._max_age       = 300 
         return
     
     def __del__(self):
+        # this prevents calling `close` on uninitialized object.
         self.sock.close()   if self.sock    is not None else ()
         self.sockv6.close() if self.sockv6  is not None else ()
         return
@@ -214,20 +219,38 @@ class Ping():
         ret = 0
         pr = pmr.packet_record
         pr.send_time = time.time()
-        icmp_packet = ip.make_icmp_ping(
-            self.icmp_ident, self.icmp_seq,
-            struct.pack("!L", self.rand_uint32)
-        )
+        icmp_packet = None
+        ping_maker = None
         if pmr.addrinfo.family == socket.AF_INET:
             sock = self.sock
+            ping_maker = ip.make_icmp_ping
+            
         else:
             # or what else can it be?
             sock = self.sockv6
+            ping_maker = ip.make_icmpv6_ping
+        ident = self.icmp_ident
+        icmp_packet = ping_maker(
+            ident, self.icmp_seq,
+            struct.pack("!L", self.rand_uint32)
+        )
         try:
-            _ = sock.sendto(icmp_packet, pmr.addrinfo.sockaddr[:2])
-            raw, _ = sock.recvfrom(DEFAULT_RCV_BUFSZ)
-            ip_pack, icmp = ip.parse_packet(raw)
-            is_er = ip.is_icmp_echo_reply(raw)
+            while True:
+                _ = sock.sendto(icmp_packet, pmr.addrinfo.sockaddr[:2])
+                raw, _ = sock.recvfrom(DEFAULT_RCV_BUFSZ)
+                # TODO: write little routines to extract informations.
+                if sock == self.sock:
+                    ip_pack, icmp = ip.parse_packet(raw)
+                    is_er = ip.is_icmp_echo_reply(raw)
+                    if is_er is True:
+                        res_id, _, _ = icmp.as_echo_reply4()
+                else:
+                    ip_pack, icmp = None, ip.ICMPv6(raw)
+                    is_er = (icmp.type == ip.ICMPv6Type.EchoReply)
+                    if is_er is True:
+                        res_id, _, _ = icmp.as_echo_reply6()
+                if is_er is True and res_id == ident:
+                    break
             pr.recv_time        = time.time()
             pr.ip_pack          = ip_pack
             pr.icmp_pack        = icmp
@@ -291,11 +314,15 @@ class Ping():
         #   packet dispatching.
         icmp_seq = self.rand_uint32
         # Identify each packet using echo reply message body field.
-        icmp_packet = ip.make_icmp_ping(
+        icmpv4_packet = ip.make_icmp_ping(
             self.icmp_ident, self.icmp_seq,
             struct.pack("!L", icmp_seq)
         )
-        packet = icmp_packet
+        # FIXME: seems we need to make IPv6 header ourselves.
+        icmpv6_packet = ip.make_icmpv6_ping(
+            self.icmp_ident, self.icmp_seq,
+            struct.pack("!L", icmp_seq)
+        )
         pr: _PacketRecord = None
         for pmr in pmr_list:
             pr = pmr.packet_record
@@ -307,9 +334,9 @@ class Ping():
             # switch sending socket according to addrinfo version.
             #_ = self.sock.sendto(packet, ai.sockaddr)
             if   ai.family == socket.AF_INET:
-                self.sock.sendto(packet, ai.sockaddr)
+                self.sock.sendto(icmpv4_packet, ai.sockaddr)
             elif ai.family == socket.AF_INET6:
-                self.sockv6.sendto(packet, ai.sockaddr[:2])
+                self.sockv6.sendto(icmpv6_packet, ai.sockaddr)
             else:
                 pass
             pr.send_time = time.time()
@@ -330,19 +357,26 @@ class Ping():
                 plog.debug("select timeout")
                 break
             for sock in r:
-                raw, (addr, _) = sock.recvfrom(DEFAULT_RCV_BUFSZ)
-                # TODO: parse packet first, then assign them to each
-                #   packet_record.
-                #   need to handle parse error.
-                ver = ip.get_ip_ver(raw)
-                ip_pack, icmp = ip.parse_packet(raw)
-                # There must be a switch, but since they have the same name,
-                # it's ok (for python).
-                is_er = ip.is_icmp_echo_reply(raw)
-                _, _, payload = icmp.as_echo_reply4() \
-                    if ver == 4 else icmp.as_echo_reply6()
+                rcv_res = sock.recvfrom(DEFAULT_RCV_BUFSZ)
+                raw, (addr, *_) = rcv_res
+                # we can't get IPv6 header in SOCK_RAW mode.
+                # TODO: handle packet is not EchoReply
+                if sock == self.sock:
+                    # is v4 socket
+                    ip_pack, icmp = ip.parse_packet(raw)
+                    is_er = ip.is_icmp_echo_reply(raw)
+                    _, _, payload = icmp.as_echo_reply4()
+                else:
+                    # NOTE: IPv6 programming is quite different.
+                    ip_pack, icmp = None, ip.ICMPv6(raw)
+                    is_er = (icmp.type == ip.ICMPv6Type.EchoReply)
+                    _, _, payload = icmp.as_echo_reply6()
+                if is_er is False:
+                    # skip those non-echoreply packets.
+                    continue
                 serial_n = struct.unpack("!L", payload)[0] \
                     if is_er is True else -1
+                
                 # ------
                 if addr in addr_pmr_map.keys():
                     # assign packets to packet_record and set recv time.
@@ -427,10 +461,9 @@ class Ping():
             skip_unknown_hosts=False
         ) -> typing.Dict[str, float]:
         """
-            Ping multiple hosts at a time, return a dict of host to delay and
-            `True` if succeeded.
-            An optional `mapping` parameter can be passed as an alternative 
-            destination of results.
+        Ping multiple hosts at a time, return a dict of host to delay.
+        An optional `mapping` parameter can be passed as an alternative 
+        destination of results.
         """
         host_delay_map: typing.Dict[str, float] = None
         get_delay_cb = operator.methodcaller("get_delay")
@@ -471,8 +504,10 @@ class Ping():
 
         with _set_timeout(self.sock, timeout), _save_ttl(self.sock):
             for i in range(1, max_hops+1):
-                self.sock.setsockopt(socket.SOL_IP, socket.IP_TTL, i)
-                assert self.sock.getsockopt(socket.SOL_IP, socket.IP_TTL) == i
+                self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, i)
+                assert self.sock.getsockopt(
+                    socket.IPPROTO_IP, socket.IP_TTL
+                ) == i
                 
                 r = self._send_icmp_er_pmr(pmr)
                 dt = pr.get_delay()
