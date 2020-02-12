@@ -268,7 +268,12 @@ class Ping():
         if addrif is None:
             raise Exception("No addrinfo for host: {}".format(host))
         pmr = _PingMultiRecord(host, addrif)
-        with _set_timeout(self.sock, timeout):
+        # check socket ip version
+        if pmr.addrinfo.family == socket.AF_INET:
+            sock = self.sock
+        else:
+            sock = self.sockv6
+        with _set_timeout(sock, timeout):
             self._send_icmp_er_pmr(pmr)
         pr = pmr.packet_record
         return (pr.is_echo_reply, pr.get_delay())
@@ -284,7 +289,12 @@ class Ping():
         res = list()
         pmr = _PingMultiRecord(host, addrif)
         pr: _PacketRecord = None
-        with _set_timeout(self.sock, timeout):
+        # check socket ip version
+        if pmr.addrinfo.family == socket.AF_INET:
+            sock = self.sock
+        else:
+            sock = self.sockv6
+        with _set_timeout(sock, timeout):
             for _ in range(count):
                 self._send_icmp_er_pmr(pmr)
                 pr = pmr.packet_record
@@ -502,7 +512,12 @@ class Ping():
         pmr = _PingMultiRecord(host, ai)
         pr = pmr.packet_record
 
-        with _set_timeout(self.sock, timeout), _save_ttl(self.sock):
+        # check socket ip version
+        if pmr.addrinfo.family == socket.AF_INET:
+            sock = self.sock
+        else:
+            sock = self.sockv6
+        with _set_timeout(sock, timeout), _save_ttl(self.sock):
             for i in range(1, max_hops+1):
                 self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, i)
                 assert self.sock.getsockopt(
